@@ -1,0 +1,15 @@
+# Derleme ve çıktı dosyaları
+output/
+bin/
+*.exe
+*.o
+*.out
+main
+pipeline
+
+# IDE ve geçici dosyalar
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
