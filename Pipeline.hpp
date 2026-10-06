@@ -1,32 +1,77 @@
 #pragma once
+
 #include "Source.hpp"
+#include "Stage.hpp"
 #include "Sink.hpp"
 #include <stdexcept>
 
-template <typename I, typename O>
+/**
+ * @brief Boru Hattı Yöneticisi (Pipeline).
+ * 
+ * Artım 2 Mimari Gelişimi:
+ * Artım 1'de boru hattı yalnızca `Source -> Sink` şeklinde doğrudan dizgi aktarımı yapıyordu.
+ * Artım 2'de ise mimari geliştirilerek boru hattının ortasına ara bir filtre/işlemci
+ * (`Stage<In, Out>`) eklendi.
+ * 
+ * Veri Akış Modeli:
+ * 1. `Source<In>` veri üretir ve `SourceInputEmitter`'a iletir (`produce`).
+ * 2. `SourceInputEmitter`, girdiyi `Stage<In, Out>::process(...)` metoduna aktarır.
+ * 3. `Stage`, geçerli veriyi dönüştürerek `StageOutputEmitter`'a iletir (hatalıları atlar).
+ * 4. `StageOutputEmitter`, çıktıyı son durak olan `Sink<Out>::consume(...)` metoduna aktarır.
+ * 
+ * Bu yapı sayesinde boru hattındaki adımlar birbirlerinden tamamen bağımsız ve gevşek bağlıdır (loosely coupled).
+ */
+template <typename In, typename Out>
 class Pipeline {
 private:
-    Source<I>* source;
-    Sink<O>* sink;
+    Source<In>* source;
+    Stage<In, Out>* stage;
+    Sink<Out>* sink;
 
-    class InternalEmitter : public Emitter<I> {
-        Sink<O>& targetSink;
+    // Stage çıktısını Sink hedefine ileten dahili Emitter
+    class StageOutputEmitter : public Emitter<Out> {
+    private:
+        Sink<Out>& targetSink;
     public:
-        explicit InternalEmitter(Sink<O>& s) : targetSink(s) {}
-        void emit(const I& item) /* override silindi */ {
+        explicit StageOutputEmitter(Sink<Out>& s) : targetSink(s) {}
+        void emit(const Out& item) override {
             targetSink.consume(item);
         }
     };
 
-public:
-    // HATA DÜZELTİLDİ: source(src), source(src) yerine tek bir source(src) yapıldı
-    Pipeline(Source<I>* src, Sink<O>* snk) : source(src), sink(snk) {}
+    // Source çıktısını Stage işlemcisine ileten dahili Emitter
+    class SourceInputEmitter : public Emitter<In> {
+    private:
+        Stage<In, Out>& targetStage;
+        StageOutputEmitter& outputEmitter;
+    public:
+        SourceInputEmitter(Stage<In, Out>& stg, StageOutputEmitter& outEmit)
+            : targetStage(stg), outputEmitter(outEmit) {}
 
-    void run() {
-        if (!source || !sink) {
-            throw std::runtime_error("Source or Sink cannot be null!");
+        void emit(const In& item) override {
+            targetStage.process(item, outputEmitter);
         }
-        InternalEmitter emitter(*sink);
-        source->produce(emitter);
+    };
+
+public:
+    /**
+     * @brief Source -> Stage -> Sink hattını oluşturan kurucu (Artım 2 Standart Yapısı).
+     */
+    Pipeline(Source<In>* src, Stage<In, Out>* stg, Sink<Out>* snk)
+        : source(src), stage(stg), sink(snk) {}
+
+    /**
+     * @brief Boru hattını çalıştırır, yaşam döngüsünü (open/close) yönetir ve veri akışını koordine eder.
+     */
+    void run() {
+        if (!source || !stage || !sink) {
+            throw std::runtime_error("Source, Stage ve Sink bos (null) olamaz!");
+        }
+
+        stage->open();
+        StageOutputEmitter stageOutEmitter(*sink);
+        SourceInputEmitter sourceInEmitter(*stage, stageOutEmitter);
+        source->produce(sourceInEmitter);
+        stage->close();
     }
 };
