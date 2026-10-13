@@ -23,17 +23,6 @@ public:
      * @brief LogRecord nesnesini tek satırda biçimlendirip konsola yazdırır.
      */
     void consume(const LogRecord& record) override {
-        // Okunabilir tek satırlık biçim: [Zaman] IP "METHOD PATH" STAT BOYUT [User-Agent]
-        std::cout << "[" << record.getTimestampIso() << "] "
-                  << record.getClientIp() << " "
-                  << "\"" << record.getMethod() << " " << record.getPath() << "\" "
-                  << record.getStatus() << " "
-                  << record.getBytes() << "B";
-
-        if (!record.getUserAgent().empty() && record.getUserAgent() != "-") {
-            std::cout << " \"" << record.getUserAgent() << "\"";
-        }
-
-        std::cout << "\n";
+        std::cout << record.toFormattedString() << "\n";
     }
 };

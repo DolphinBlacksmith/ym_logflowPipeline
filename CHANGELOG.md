@@ -1,61 +1,54 @@
-# Değişiklik Günlüğü (Change Log) - Sürüm v2.0 (Artım 2)
+# Değişiklik Günlüğü (Change Log)
 
 **Dönem Projesi:** LogFlow İşlem Hattı (Pipe and Filter)  
 **Öğrenci:** YunusEmre Demirci (2404040249)  
-**Sürüm:** v2.0 (Etiket: `v2`)  
+
+---
+
+## [v3] Sürüm 3.0 (Artım 3 — Bileşim: Filtreleme, Projeksiyon ve Pipeline Builder)
 **Tarih:** Ekim 2026  
+**Etiket:** `v3`  
+**Mimari Odak:** Modülerlik, bileşilebilirlik (composability), aşama düzeyinde tek sorumluluk (SRP), veri minimizasyonu ve yaşam döngüsü yönetimi.
+
+### 1. Yeni Eklenen Dosyalar
+- [`PredicateFilterStage.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PredicateFilterStage.hpp) (38 satır): Bir kaydı yalnızca `Predicate<LogRecord>` koşulu sağlanıyorsa ileten filtre aşaması (`status >= 400`, `path startsWith /api`, `timestampInRange`, özel lambda).
+- [`ProjectionStage.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ProjectionStage.hpp) (28 satır): Her kaydı seçilen alanların bir alt kümesine indirgeyen projeksiyon aşaması (veri minimizasyonu ve gizlilik odaklı).
+- [`FileSink.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/FileSink.hpp) (37 satır): Bir çıktı dosyasına yazan, `open()` ve `close()` yaşam döngüsü kancalarını uygulayan ve arabellek kayıplarını önleyen hedef aşama.
+- [`PipelineBuilder.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PipelineBuilder.hpp): Aşamaların derleme zamanında tip güvenliğiyle, istenen sayıda ve sırada birbirine bağlanmasını sağlayan akıcı (fluent) kurucu sınıfı.
+- [`ARCHITECTURE.md`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ARCHITECTURE.md): Mimari ilkeleri, aşama tasarımlarını ve 25.000 satırlık log kümesi üzerinde yürütülen sıralama deneyini (Ordering Experiment & Equivalence Test) belgeleyen kapsamlı teknik rapor.
+- [`scripts/run_experiment.py`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/scripts/run_experiment.py): Sıralama deneyini (Sıra A: Filter-First vs. Sıra B: Project-First) otomatize eden, SHA-256 doğrulamasını yapan ve çalışma sürelerini ölçen betik.
+- [`tests/fixtures/test_access.log`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/tests/fixtures/test_access.log): 3 aşamalı entegrasyon testi için küçük ve kontrollü test verisi.
+
+### 2. Değiştirilen Dosyalar
+- [`Sink.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Sink.hpp): Yaşam döngüsü yönetimi için `virtual void open() {}` ve `virtual void close() {}` kancaları eklendi (geriye dönük tam uyumlu).
+- [`LogRecord.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/LogRecord.hpp): Projeksiyon desteği (`projectedFields_`, `isProjected()`), tek tip biçimlendirme (`toFormattedString()`), Builder'da `project(...)` statik metodu ve lambda dostu kısa getter takma adları (`status()`, `path()`, `timestamp()` vb.) eklendi.
+- [`ConsoleSink.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ConsoleSink.hpp): Biçimlendirme işlemi `record.toFormattedString()` metoduna devredilerek projeksiyonlu çıktılarla tam uyumlu hale getirildi.
+- [`Pipeline.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Pipeline.hpp): Çok aşamalı akıcı boru hatlarını yürütecek ve RAII tabanlı otomatik kaynak temizliği yapacak şekilde güncellendi; Artım 2'deki 3 parametreli kurucu da korundu.
+- [`main.cpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/main.cpp): `--min-status`, `--path-prefix`, `--fields`, `--out`, `--order` komut satırı argümanlarını ayrıştıran ve boru hattını `PipelineBuilder` ile dinamik inşa eden CLI filtre arayüzüne dönüştürüldü.
+- [`tests/test_runner.cpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/tests/test_runner.cpp): 15 olan test sayısı 31'e çıkarıldı; PredicateFilterStage, ProjectionStage, FileSink, PipelineBuilder, 3 aşamalı entegrasyon ve sıralama bağımsızlığı testleri eklendi.
+- [`Makefile`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Makefile): Yeni başlık dosyaları, `run-filtered` ve `experiment` hedefleri eklendi.
+- [`README.md`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/README.md): Artım 3 yenilikleri, yeni CLI kullanımı ve kapsama oranları eklendi.
+
+### 3. Test ve Satır Kapsama Sonuçları
+- **Testler:** 31 / 31 Başarılı (%100 Başarı)
+- **Satır Kapsama (Line Coverage):** **%94.82** (984 satır üzerinden)
+- **Sıralama Deneyi:** Sıra A ve Sıra B çıktılarının SHA-256 kriptografik özeti birebir aynı çıktı (`08562754...19a321f`).
 
 ---
 
-## 1. Genel Bakış ve Mimari Odak
-Artım 2 kapsamında sistem:
-- "İşlem hattı ham dizgi (`std::string`) taşır" anlayışından, "işlem hattı zengin bir alan modeli (`LogRecord`) taşır" anlayışına geçirilmiştir.
-- Mevcut boru hattının ortasına yeni bir ara filtre aşaması (`ParserStage`) yerleştirilmiş ve komşu aşamaların (`FileLineSource`, `Source`, `Emitter`) hiçbirinin değişmediği gözlemlenmiştir.
-- Disk ve dosya sistemine dokunmayan bir test dublörü (`CollectingEmitter`) ile kapsamlı bir birim test paketi ve satır kapsama (line coverage) analizi devreye alınmıştır.
+## [v2] Sürüm 2.0 (Artım 2 — Tipli Kayıtlar ve İlk Gerçek Filtre)
+**Tarih:** Ekim 2026  
+**Etiket:** `v2`  
+- `LogRecord` alan modeli ve Builder deseni eklendi.
+- `ParserStage` Common Log Format ayrıştırıcısı yazıldı, hatalı satırlar sayıldı.
+- `ConsoleSink` güncellendi.
+- `CollectingEmitter` test dublörü ve 15 test senaryosu geliştirildi.
+- GCOV kapsama oranı %97+ olarak raporlandı.
 
 ---
 
-## 2. Değiştirilen Dosyalar (Modified Files)
-
-| Dosya | Değişiklik Nedeni ve Yapılan İşlem |
-|---|---|
-| [`ConsoleSink.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ConsoleSink.hpp) | Önceki artımda `Sink<std::string>` olarak ham satırları yazdırırken, Artım 2'de `Sink<LogRecord>` arayüzünü uygulayacak şekilde güncellendi. Ayrıştırılmış `LogRecord` nesnesini tek satırlık okunabilir ve yapılandırılmış biçimde konsola basar. |
-| [`Pipeline.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Pipeline.hpp) | Önceki artımda yalnızca `Source -> Sink` doğrudan bağlantısını desteklerken, ara filtre/aşama (`Stage<In, Out>`) bağlamayı destekleyecek şekilde güncellendi. Yaşam döngüsü metodları (`open()` ve `close()`) işletildi. |
-| [`main.cpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/main.cpp) | `FileLineSource` -> `ParserStage` -> `ConsoleSink` boru hattını birbirine bağlayacak ve işlem tamamlandığında toplam hatalı/atlanan satır sayısını ekrana yazdıracak şekilde güncellendi. |
-| [`Makefile`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Makefile) | `logflow` ikili dosyasını üretecek, birim testleri (`make test`) koşacak ve gcov kapsama analizini (`make coverage`) çalıştıracak hedeflerle zenginleştirildi. |
-| [`Project1.dev`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Project1.dev) | Yeni başlık dosyalarını (`LogRecord.hpp`, `ParserStage.hpp`, `CollectingEmitter.hpp`) içerecek biçimde güncellendi. |
-| [`README.md`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/README.md) | Artım 2 gereksinimleri, demo soruları ve cevapları, kapsama oranları ve mimari detaylarla baştan sona güncellendi. |
-
----
-
-## 3. Yeni Eklenen Dosyalar (Added Files)
-
-| Dosya | Amaç ve Sorumluluk |
-|---|---|
-| [`LogRecord.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/LogRecord.hpp) | Değişmez (Immutable) alan modeli sınıfı. `Instant timestamp`, `clientIp`, `method`, `path`, `status`, `bytes`, `userAgent`, `attributes` ve `raw` alanlarını içerir. Builder tasarım deseni ile nesne inşası ve 5-7. haftalar için OCP genişleme noktası olan `attributes` haritasını barındırır. |
-| [`ParserStage.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ParserStage.hpp) | `Stage<std::string, LogRecord>` arayüzünü uygulayan Common Log Format (CLF) ve Combined Log Format ayrıştırıcı aşaması. Hatalı satırları sayar ve atlar (Artım 5'te Dead Letter Queue mimarisine zemin hazırlar). |
-| [`CollectingEmitter.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/CollectingEmitter.hpp) | `Emitter<T>` arayüzünü uygulayan bellek içi Test Dublörü (Test Double / Spy). Testlerin dosya sistemine dokunmadan hızlı, yalıtılmış ve deterministik çalışmasını sağlar. |
-| [`tests/test_runner.cpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/tests/test_runner.cpp) | Ödevde zorunlu kılınan 8 temel test senaryosu ve ek mimari doğrulama testlerini içeren sıfır bağımlılıklı (zero-dependency) birim test paketi. |
-| [`data/access-small.log`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/data/access-small.log) | Ödev şartnamesinde belirtilen standart örnek log verisi. |
-| [`data/access-malformed.log`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/data/access-malformed.log) | Hatalı satırların başarıyla atlanıp sayıldığını doğrulamak için hazırlanan karma test verisi. |
-| [`CHANGELOG.md`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/CHANGELOG.md) | Bu değişiklik günlüğü belgesi. |
-
----
-
-## 4. Değiştirilmeyen Dosyalar (Unchanged Files)
-
-| Dosya | Durum ve Mimari Önemi |
-|---|---|
-| [`Source.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Source.hpp) | **Değişmedi.** Soyut veri kaynağı arayüzü mimarinin temel yapı taşıdır. |
-| [`FileLineSource.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/FileLineSource.hpp) | **Değişmedi.** Dosyadan satır satır metin okuma sorumluluğu aynen korundu. Araya yeni bir ayrıştırıcı aşama eklenmesi veri kaynağını hiçbir şekilde etkilemedi (Separation of Concerns). |
-| [`Emitter.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Emitter.hpp) | **Değişmedi.** Aşamalar arası veri iletim kontratı sabit kaldı. |
-| [`Stage.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Stage.hpp) | **Değişmedi.** Boru hattı filtre arayüzü polimorfik olarak korundu. |
-| [`Sink.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Sink.hpp) | **Değişmedi.** Boru hattı hedef arayüzü korundu. |
-
----
-
-## 5. Mimari Değerlendirme
-Bu artım ile Pipe & Filter deseninin en büyük gücü olan:
-1. **Separation of Concerns:** Dosya okuma (`FileLineSource`), veri ayrıştırma (`ParserStage`) ve ekrana yazdırma (`ConsoleSink`) birbirini tanımaz.
-2. **Open-Closed Principle:** Araya yeni aşama eklendiğinde mevcut aşamalar değiştirilmemiş, yeni aşamalar sisteme kolayca entegre edilmiştir.
-3. **Testability (Test Edilebilirlik):** `CollectingEmitter` sayesinde aşamalar I/O katmanından bağımsız olarak %97+ satır kapsama oranı ile test edilmiştir.
+## [v1.0] Sürüm 1.0 (Artım 1 — Boru Hattı Başlangıcı)
+**Tarih:** Eylül 2026  
+**Etiket:** `v1.0`  
+- `Source`, `Sink`, `Stage`, `Emitter` temel arayüzleri kuruldu.
+- `FileLineSource` ve `ConsoleSink` ile doğrudan `Source -> Sink` boru hattı işletildi.

@@ -20,4 +20,6 @@ test_runner_cov
 .idea/
 *.swp
 *~
-.DS_Store
+# Test ve benchmark çıktıları
+tests/output/
+data/benchmark*.log

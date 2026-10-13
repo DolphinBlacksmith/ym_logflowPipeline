@@ -1,4 +1,4 @@
-# LogFlow - Yazılım Mimarisi Dönem Projesi (Artım 2)
+# LogFlow - Yazılım Mimarisi Dönem Projesi (Artım 3)
 # Derleyici ve Bayraklar
 CXX = g++
 CXXFLAGS = -Wall -Wextra -std=c++17 -O2
@@ -12,10 +12,14 @@ COV_TARGET = test_runner_cov
 
 SRCS = main.cpp
 TEST_SRCS = tests/test_runner.cpp
+HEADERS = Source.hpp Sink.hpp Stage.hpp Emitter.hpp LogRecord.hpp \
+          FileLineSource.hpp ConsoleSink.hpp FileSink.hpp \
+          ParserStage.hpp PredicateFilterStage.hpp ProjectionStage.hpp \
+          Pipeline.hpp PipelineBuilder.hpp CollectingEmitter.hpp
 
 all: $(TARGET) $(LEGACY_TARGET)
 
-$(TARGET): $(SRCS) LogRecord.hpp ParserStage.hpp ConsoleSink.hpp Pipeline.hpp FileLineSource.hpp Source.hpp Sink.hpp Stage.hpp Emitter.hpp
+$(TARGET): $(SRCS) $(HEADERS)
 	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SRCS)
 
 $(LEGACY_TARGET): $(TARGET)
@@ -24,14 +28,19 @@ $(LEGACY_TARGET): $(TARGET)
 run: $(TARGET)
 	./$(TARGET) data/access-small.log
 
-run-malformed: $(TARGET)
-	./$(TARGET) data/access-malformed.log
+run-filtered: $(TARGET)
+	@mkdir -p output
+	./$(TARGET) data/access-small.log --min-status 400 --path-prefix /api --fields timestamp,clientIp,status --out output/filtered.log
+	@cat output/filtered.log
 
 test: $(TEST_TARGET)
 	./$(TEST_TARGET)
 
-$(TEST_TARGET): $(TEST_SRCS) LogRecord.hpp ParserStage.hpp CollectingEmitter.hpp
+$(TEST_TARGET): $(TEST_SRCS) $(HEADERS)
 	$(CXX) $(CXXFLAGS) -o $(TEST_TARGET) $(TEST_SRCS)
+
+experiment: $(TARGET)
+	@python3 scripts/run_experiment.py
 
 coverage: clean
 	@echo "Coverage derlemesi yapiliyor..."
@@ -48,6 +57,6 @@ coverage: clean
 clean:
 	rm -f $(TARGET) $(LEGACY_TARGET) $(TEST_TARGET) $(COV_TARGET)
 	rm -f *.gcda *.gcno *.gcov tests/*.gcda tests/*.gcno
-	rm -rf output/main
+	rm -rf output/*.log
 
-.PHONY: all run run-malformed test coverage clean
+.PHONY: all run run-filtered test experiment coverage clean
