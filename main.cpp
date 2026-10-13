@@ -195,39 +195,57 @@ int main(int argc, char* argv[]) {
     }
 
     // Parametresiz çalıştırma (IDE / F9): Hocaya gösterilecek interaktif seçim menüsü
-    std::cout << "\n======================================================================\n";
-    std::cout << "       LogFlow Boru Hatti (Artim 3) - Filtre Secim Menusu\n";
-    std::cout << "======================================================================\n";
-    std::cout << "Girdi Log Dosyasi: " << inputFile << "\n\n";
-    std::cout << "Hocanin istedigi 3 adet filtre hazirdir. Lutfen secim yapin:\n\n";
-    std::cout << "  [1] 1. Filtre: Durum Kodu Filtresi (status >= 400)\n";
-    std::cout << "      -> 400 ve uzeri hata kodlarina (401, 404, 500) sahip kayitlari getirir.\n\n";
-    std::cout << "  [2] 2. Filtre: Yol On-Eki Filtresi (path startsWith /api)\n";
-    std::cout << "      -> Yalnizca /api ile baslayan endpoint isteklerini getirir.\n\n";
-    std::cout << "  [3] 3. Filtre: Zaman Damgasi Araligi (10:01:00 - 10:04:00)\n";
-    std::cout << "      -> Belirtilen zaman diliminde gerceklesen kayitlari getirir.\n\n";
-    std::cout << "  [4] Ekstra: Coklu Filtre Zinciri (status >= 400 VE path startsWith /api)\n";
-    std::cout << "      -> Birden fazla filtre asamasinin arka arkaya baglandigi pipeline.\n\n";
-    std::cout << "  [5] Filtresiz: Tum Gecerli Kayitlari Listele\n";
-    std::cout << "  [0] Cikis\n";
-    std::cout << "----------------------------------------------------------------------\n";
-    std::cout << "Seciminiz [1-5 veya 0]: ";
+    while (true) {
+        std::cout << "\n======================================================================\n";
+        std::cout << "       LogFlow Boru Hatti (Artim 3) - Filtre Secim Menusu\n";
+        std::cout << "======================================================================\n";
+        std::cout << "Girdi Log Dosyasi: " << inputFile << "\n\n";
+        std::cout << "Hocanin istedigi 3 adet filtre hazirdir. Lutfen secim yapin:\n\n";
+        std::cout << "  [1] 1. Filtre: Durum Kodu Filtresi (status >= 400)\n";
+        std::cout << "      -> 400 ve uzeri hata kodlarina (401, 404, 500) sahip kayitlari getirir.\n\n";
+        std::cout << "  [2] 2. Filtre: Yol On-Eki Filtresi (path startsWith /api)\n";
+        std::cout << "      -> Yalnizca /api ile baslayan endpoint isteklerini getirir.\n\n";
+        std::cout << "  [3] 3. Filtre: Zaman Damgasi Araligi (10:01:00 - 10:04:00)\n";
+        std::cout << "      -> Belirtilen zaman diliminde gerceklesen kayitlari getirir.\n\n";
+        std::cout << "  [4] Ekstra: Coklu Filtre Zinciri (status >= 400 VE path startsWith /api)\n";
+        std::cout << "      -> Birden fazla filtre asamasinin arka arkaya baglandigi pipeline.\n\n";
+        std::cout << "  [5] Filtresiz: Tum Gecerli Kayitlari Listele\n";
+        std::cout << "  [0] Cikis\n";
+        std::cout << "----------------------------------------------------------------------\n";
+        std::cout << "Seciminiz [1-5 veya 0]: " << std::flush;
 
-    int choice = -1;
-    if (std::cin >> choice) {
-        if (choice == 0) {
-            std::cout << "Cikis yapildi.\n";
-            return 0;
+        std::string inputStr;
+        if (!std::getline(std::cin, inputStr)) {
+            // EOF veya terminal kapandı
+            break;
         }
+
+        size_t first = inputStr.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) {
+            std::cout << "-> Herhangi bir secim yapmadiniz. Lutfen bir sayi (1-5) tuslayip Enter'a basin.\n";
+            continue;
+        }
+        std::string trimmed = inputStr.substr(first);
+
+        int choice = -1;
+        try {
+            choice = std::stoi(trimmed);
+        } catch (...) {
+            std::cout << "\n[!] Gecersiz karakter! Lutfen sadece 0-5 arasi bir rakam girin.\n";
+            continue;
+        }
+
+        if (choice == 0) {
+            std::cout << "\nLogFlow'dan cikis yapildi. Iyi calismalar!\n";
+            break;
+        }
+
         if (choice >= 1 && choice <= 5) {
             executePipeline(inputFile, outputFile, choice, minStatus, pathPrefix, fieldsArg, order);
+            std::cout << "(Farkli bir filtre denemek icin asagidan yeni secim yapabilir veya 0 ile cikabilirsiniz)\n";
         } else {
-            std::cout << "Gecersiz secim! Varsayilan olarak 1. Filtre (status >= 400) calistiriliyor:\n";
-            executePipeline(inputFile, outputFile, 1, minStatus, pathPrefix, fieldsArg, order);
+            std::cout << "\n[!] Gecersiz secim! Lutfen 1 ile 5 arasinda bir secenek belirleyin.\n";
         }
-    } else {
-        // Girdi alınamadıysa (örneğin arka plan veya tty olmayan ortamda) varsayılan 1. Filtreyi çalıştır
-        executePipeline(inputFile, outputFile, 1, minStatus, pathPrefix, "timestamp,clientIp,status,path", order);
     }
 
     return 0;
