@@ -1,5 +1,8 @@
-# Derleme ve çıktı dosyaları
-output/
+# Derleme ve ikili dosyalar
+output/main
+output/*.exe
+output/*.o
+output/*.out
 bin/
 *.exe
 *.o

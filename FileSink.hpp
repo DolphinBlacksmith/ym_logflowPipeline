@@ -4,7 +4,7 @@
 #include "LogRecord.hpp"
 #include <fstream>
 #include <stdexcept>
-#include <string>
+#include <filesystem>
 
 /**
  * @brief FileSink — cikti dosyasina yazar; open()/close() yasam dongusunu uygular.
@@ -19,6 +19,8 @@ public:
     ~FileSink() override { close(); }
 
     void open() override {
+        auto p = std::filesystem::u8path(filePath);
+        if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path());
         outFile.open(filePath.c_str());
         if (!outFile.is_open()) throw std::runtime_error("Could not open output file: " + filePath);
     }
