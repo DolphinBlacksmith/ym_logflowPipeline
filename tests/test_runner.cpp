@@ -724,6 +724,45 @@ TEST_CASE(test_31_integration_composability_and_order_invariance) {
     }
 }
 
+/**
+ * @brief 32. Test: Coklu Filtre Asamalarinin Arka Arkaya Zincirlenmesi (Multiple Filters in Series)
+ * 
+ * Gereksinim:
+ * "Aşamaların (stage) herhangi bir sırada ve herhangi bir sayıda bir araya getirilebildiğini göstermek."
+ * 
+ * Bu test, boru hattında BİRDEN FAZLA PredicateFilterStage aşamasının (status >= 400 VE path startsWith /api VE bytes > 300)
+ * arka arkaya eklenebildiğini ve her birinin tek sorumlulukla çalıştığını doğrular.
+ */
+TEST_CASE(test_32_multiple_predicate_filters_chained) {
+    std::string fixturePath = "tests/fixtures/test_access.log";
+    std::string outMulti = "tests/output/out_multi_filters.log";
+
+    // 1. ParserStage
+    // 2. Filtre 1: status >= 400
+    // 3. Filtre 2: path startsWith /api
+    // 4. Filtre 3: bytes > 300
+    // 5. ProjectionStage: status, path, bytes
+    // 6. FileSink
+    Pipeline p = PipelineBuilder::from(new FileLineSource(fixturePath))
+        .via(new ParserStage())
+        .via(new PredicateFilterStage(PredicateFilterStage::statusAtLeast(400)))
+        .via(new PredicateFilterStage(PredicateFilterStage::pathStartsWith("/api")))
+        .via(new PredicateFilterStage([](const LogRecord& r) { return r.bytes() > 300; }))
+        .via(new ProjectionStage({"status", "path", "bytes"}))
+        .to(new FileSink(outMulti));
+    p.run();
+
+    auto lines = readFileLines(outMulti);
+    // Fixture içinde status >= 400 ve /api olanlar:
+    // 192.168.1.15 -> 401, /api/login, 512B (>300 -> KALIR)
+    // 192.168.1.25 -> 403, /api/secrets, 256B (<=300 -> ELENIR)
+    // 192.168.1.30 -> 404, /api/missing, 128B (<=300 -> ELENIR)
+    // 192.168.1.35 -> 500, /api/crash, 4096B (>300 -> KALIR)
+    ASSERT_EQ(lines.size(), 2);
+    ASSERT_STR_EQ(lines[0], "401 /api/login 512");
+    ASSERT_STR_EQ(lines[1], "500 /api/crash 4096");
+}
+
 // ============================================================================
 // ANA TEST KOŞUCU (MAIN)
 // ============================================================================
@@ -750,7 +789,7 @@ int main() {
     RUN_TEST(test_14_hatali_bayt_degeri);
     RUN_TEST(test_15_collecting_emitter_metotlari);
 
-    // Artım 3 Yeni Testleri (16-31)
+    // Artım 3 Yeni Testleri (16-32)
     std::cout << "------------------------------------------------------------\n";
     std::cout << " Artim 3: Yeni Asama ve Entegrasyon Testleri\n";
     std::cout << "------------------------------------------------------------\n";
@@ -774,6 +813,7 @@ int main() {
 
     RUN_TEST(test_30_integration_3_stage_pipeline_fixture);
     RUN_TEST(test_31_integration_composability_and_order_invariance);
+    RUN_TEST(test_32_multiple_predicate_filters_chained);
 
     std::cout << "============================================================\n";
     std::cout << "Test Sonuclari: " << g_passCount << " Basarili, " << g_failCount << " Basarisiz\n";
@@ -781,3 +821,4 @@ int main() {
 
     return (g_failCount == 0) ? 0 : 1;
 }
+

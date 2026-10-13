@@ -85,6 +85,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (argc == 1) {
+        // Parametresiz doğrudan çalıştırma (IDE / F9): Hocanın ödev dokümanındaki örnek boru hattı işletilir
+        minStatus = 400;
+        fieldsArg = "timestamp,clientIp,status,path";
+    }
+
     try {
         std::cout << "LogFlow Boru Hatti (Artim 3) Baslatiliyor...\n";
         std::cout << "Girdi Dosyasi: " << inputFile << "\n";
@@ -100,14 +106,10 @@ int main(int argc, char* argv[]) {
         if (!fieldsArg.empty()) std::cout << "Projeksiyon Alanlari: " << fieldsArg << "\n";
         std::cout << "------------------------------------------------------------\n";
 
-        // Filtre koşulu
-        bool hasFilter = (minStatus >= 0 || !pathPrefix.empty());
-        auto pred = [minStatus, pathPrefix](const LogRecord& r) {
-            if (minStatus >= 0 && r.status() < minStatus) return false;
-            if (!pathPrefix.empty() && r.path().rfind(pathPrefix, 0) != 0) return false;
-            return true;
-        };
-
+        // Artım 3 Mimarisi: Aşama düzeyinde Tek Sorumluluk (SRP).
+        // min-status ve path-prefix filtreleri BİRBİRİNDEN BAĞIMSIZ AYRI AŞAMALAR olarak eklenir.
+        bool hasStatusFilter = (minStatus >= 0);
+        bool hasPathFilter = (!pathPrefix.empty());
         std::vector<std::string> fields = split(fieldsArg, ',');
         bool hasProjection = !fields.empty();
 
@@ -119,16 +121,23 @@ int main(int argc, char* argv[]) {
             .via(&parser, false);
 
         if (order == "project-first") {
+            // Projeksiyon önce
             if (hasProjection) {
                 step = step.via(new ProjectionStage(fields));
             }
-            if (hasFilter) {
-                step = step.via(new PredicateFilterStage(pred));
+            if (hasStatusFilter) {
+                step = step.via(new PredicateFilterStage(PredicateFilterStage::statusAtLeast(minStatus)));
+            }
+            if (hasPathFilter) {
+                step = step.via(new PredicateFilterStage(PredicateFilterStage::pathStartsWith(pathPrefix)));
             }
         } else {
-            // Varsayılan: filter-first
-            if (hasFilter) {
-                step = step.via(new PredicateFilterStage(pred));
+            // Varsayılan: Çoklu filtre aşamaları önce, projeksiyon sonra (Filter-First)
+            if (hasStatusFilter) {
+                step = step.via(new PredicateFilterStage(PredicateFilterStage::statusAtLeast(minStatus)));
+            }
+            if (hasPathFilter) {
+                step = step.via(new PredicateFilterStage(PredicateFilterStage::pathStartsWith(pathPrefix)));
             }
             if (hasProjection) {
                 step = step.via(new ProjectionStage(fields));
