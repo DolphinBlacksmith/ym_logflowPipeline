@@ -1,4 +1,4 @@
-# LogFlow - Yazılım Mimarisi Dönem Projesi (Artım 3)
+# LogFlow - Yazılım Mimarisi Dönem Projesi (Artım 4)
 # Derleyici ve Bayraklar
 CXX = g++
 CXXFLAGS = -Wall -Wextra -std=c++17 -O2
@@ -15,7 +15,8 @@ TEST_SRCS = tests/test_runner.cpp
 HEADERS = Source.hpp Sink.hpp Stage.hpp Emitter.hpp LogRecord.hpp \
           FileLineSource.hpp ConsoleSink.hpp FileSink.hpp \
           ParserStage.hpp PredicateFilterStage.hpp ProjectionStage.hpp \
-          Pipeline.hpp PipelineBuilder.hpp CollectingEmitter.hpp
+          Pipeline.hpp PipelineBuilder.hpp CollectingEmitter.hpp \
+          StageFactory.hpp StageRegistry.hpp PipelineLoader.hpp
 
 all: $(TARGET) $(LEGACY_TARGET)
 
@@ -26,7 +27,12 @@ $(LEGACY_TARGET): $(TARGET)
 	ln -sf $(TARGET) $(LEGACY_TARGET)
 
 run: $(TARGET)
-	./$(TARGET) data/access-small.log
+	./$(TARGET) --config configs/error-report.yaml
+
+run-configs: $(TARGET)
+	./$(TARGET) --config configs/error-report.yaml
+	./$(TARGET) --config configs/api-traffic.yaml
+	./$(TARGET) --config configs/bandwidth-by-client.yaml
 
 run-filtered: $(TARGET)
 	@mkdir -p output
@@ -59,4 +65,4 @@ clean:
 	rm -f *.gcda *.gcno *.gcov tests/*.gcda tests/*.gcno
 	rm -rf output/*.log
 
-.PHONY: all run run-filtered test experiment coverage clean
+.PHONY: all run run-configs run-filtered test experiment coverage clean

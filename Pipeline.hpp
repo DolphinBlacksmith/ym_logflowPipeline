@@ -19,12 +19,13 @@ class Pipeline<void, void> {
 private:
     std::function<void()> runFn_;
     std::vector<std::function<void()>> deleters_;
+    std::string name_;
 
 public:
     Pipeline() = default;
 
-    Pipeline(std::function<void()> runFn, std::vector<std::function<void()>> deleters)
-        : runFn_(std::move(runFn)), deleters_(std::move(deleters)) {}
+    Pipeline(std::function<void()> runFn, std::vector<std::function<void()>> deleters, std::string name = "")
+        : runFn_(std::move(runFn)), deleters_(std::move(deleters)), name_(std::move(name)) {}
 
     ~Pipeline() {
         for (auto& del : deleters_) {
@@ -33,7 +34,7 @@ public:
     }
 
     Pipeline(Pipeline&& other) noexcept
-        : runFn_(std::move(other.runFn_)), deleters_(std::move(other.deleters_)) {
+        : runFn_(std::move(other.runFn_)), deleters_(std::move(other.deleters_)), name_(std::move(other.name_)) {
         other.deleters_.clear();
     }
 
@@ -44,6 +45,7 @@ public:
             }
             runFn_ = std::move(other.runFn_);
             deleters_ = std::move(other.deleters_);
+            name_ = std::move(other.name_);
             other.deleters_.clear();
         }
         return *this;
@@ -51,6 +53,9 @@ public:
 
     Pipeline(const Pipeline&) = delete;
     Pipeline& operator=(const Pipeline&) = delete;
+
+    void setName(std::string name) { name_ = std::move(name); }
+    const std::string& getName() const { return name_; }
 
     void run() {
         if (runFn_) {

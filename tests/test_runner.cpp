@@ -13,6 +13,9 @@
 #include "../ProjectionStage.hpp"
 #include "../FileSink.hpp"
 #include "../FileLineSource.hpp"
+#include "../StageFactory.hpp"
+#include "../StageRegistry.hpp"
+#include "../PipelineLoader.hpp"
 
 // Basit ve Şık Birim Test Makroları (Zero-dependency xUnit / JUnit stili)
 static int g_passCount = 0;
@@ -764,12 +767,493 @@ TEST_CASE(test_32_multiple_predicate_filters_chained) {
 }
 
 // ============================================================================
+// ARTIM 4: YAPILANDIRMA YÜKLEYİCİ (PIPELINELOADER) VE KAYIT DEFTERİ TESTLERİ (33-42)
+// ============================================================================
+
+/**
+ * @brief 33. Test (Görev 6.1): Geçerli Bir Yapılandırma (Valid Configuration)
+ */
+TEST_CASE(test_33_loader_valid_configuration) {
+    std::string yaml =
+        "pipeline:\n"
+        "  name: test-error-report\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: tests/fixtures/test_access.log }\n"
+        "  stages:\n"
+        "    - type: parse\n"
+        "      params: { format: clf }\n"
+        "    - type: filter\n"
+        "      params: { field: status, op: \">=\", value: 400 }\n"
+        "    - type: project\n"
+        "      params: { fields: [timestamp, clientIp, status, path] }\n"
+        "  sink:\n"
+        "    type: file\n"
+        "    params: { path: tests/output/loader_valid_out.txt }\n";
+
+    PipelineLoader loader;
+    Pipeline<> p = loader.loadFromString(yaml);
+    ASSERT_STR_EQ(p.getName(), "test-error-report");
+    p.run();
+
+    auto lines = readFileLines("tests/output/loader_valid_out.txt");
+    ASSERT_EQ(lines.size(), 4);
+    ASSERT_STR_EQ(lines[0], "2026-09-29T07:01:05Z 192.168.1.15 401 /api/login");
+    ASSERT_STR_EQ(lines[3], "2026-09-29T07:05:25Z 192.168.1.35 500 /api/crash");
+}
+
+/**
+ * @brief 34. Test (Görev 6.2): Bilinmeyen Bir Aşama Türü (Unknown Stage Type)
+ */
+TEST_CASE(test_34_loader_unknown_stage_type) {
+    std::string yaml =
+        "pipeline:\n"
+        "  name: unknown-stage-test\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: data/access.log }\n"
+        "  stages:\n"
+        "    - type: parse\n"
+        "      params: { format: clf }\n"
+        "    - type: non_existent_stage\n"
+        "      params: { foo: bar }\n"
+        "  sink:\n"
+        "    type: file\n"
+        "    params: { path: tests/output/should_not_exist.txt }\n";
+
+    PipelineLoader loader;
+    bool caughtConfigError = false;
+    std::string errMsg;
+    try {
+        Pipeline<> p = loader.loadFromString(yaml);
+        p.run();
+    } catch (const ConfigValidationException& e) {
+        caughtConfigError = true;
+        errMsg = e.what();
+    }
+
+    ASSERT_TRUE(caughtConfigError);
+    ASSERT_TRUE(errMsg.find("non_existent_stage") != std::string::npos);
+    ASSERT_TRUE(errMsg.find("Bilinmeyen asama turu") != std::string::npos);
+}
+
+/**
+ * @brief 35. Test (Görev 6.3): Eksik Bir Parametre (Missing Parameter)
+ */
+TEST_CASE(test_35_loader_missing_parameter) {
+    // 'filter' aşamasında zorunlu 'value' parametresi eksik
+    std::string yamlMissingFilterValue =
+        "pipeline:\n"
+        "  name: missing-param-test\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: data/access.log }\n"
+        "  stages:\n"
+        "    - type: parse\n"
+        "      params: { format: clf }\n"
+        "    - type: filter\n"
+        "      params: { field: status, op: \">=\" }\n"
+        "  sink:\n"
+        "    type: file\n"
+        "    params: { path: tests/output/missing_param.txt }\n";
+
+    PipelineLoader loader;
+    bool caughtMissingValue = false;
+    std::string errMsg1;
+    try {
+        loader.loadFromString(yamlMissingFilterValue);
+    } catch (const ConfigValidationException& e) {
+        caughtMissingValue = true;
+        errMsg1 = e.what();
+    }
+    ASSERT_TRUE(caughtMissingValue);
+    ASSERT_TRUE(errMsg1.find("Eksik parametre") != std::string::npos);
+    ASSERT_TRUE(errMsg1.find("value") != std::string::npos);
+
+    // 'source (type: file)' içinde zorunlu 'path' parametresi eksik
+    std::string yamlMissingSourcePath =
+        "pipeline:\n"
+        "  name: missing-source-path\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: {}\n"
+        "  stages:\n"
+        "    - type: parse\n"
+        "      params: { format: clf }\n"
+        "  sink:\n"
+        "    type: console\n";
+
+    bool caughtMissingPath = false;
+    try {
+        loader.loadFromString(yamlMissingSourcePath);
+    } catch (const ConfigValidationException&) {
+        caughtMissingPath = true;
+    }
+    ASSERT_TRUE(caughtMissingPath);
+}
+
+/**
+ * @brief 36. Test (Görev 6.4): Yanlış Türde Bir Parametre (Wrong Parameter Type)
+ */
+TEST_CASE(test_36_loader_wrong_parameter_type) {
+    PipelineLoader loader;
+
+    // Durum 1: Sayısal 'status' alanı için tamsayı yerine metin ("not_a_number") verilmesi
+    std::string yamlWrongInt =
+        "pipeline:\n"
+        "  name: wrong-type-int\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: data/access.log }\n"
+        "  stages:\n"
+        "    - type: parse\n"
+        "      params: { format: clf }\n"
+        "    - type: filter\n"
+        "      params: { field: status, op: \">=\", value: \"not_a_number\" }\n"
+        "  sink:\n"
+        "    type: console\n";
+
+    bool caughtWrongInt = false;
+    std::string errMsg1;
+    try {
+        loader.loadFromString(yamlWrongInt);
+    } catch (const ConfigValidationException& e) {
+        caughtWrongInt = true;
+        errMsg1 = e.what();
+    }
+    ASSERT_TRUE(caughtWrongInt);
+    ASSERT_TRUE(errMsg1.find("Yanlis turde parametre") != std::string::npos);
+    ASSERT_TRUE(errMsg1.find("integer") != std::string::npos);
+
+    // Durum 2: 'project' aşamasında 'fields' için liste ([...]) yerine skaler tamsayı (400) verilmesi
+    std::string yamlWrongList =
+        "pipeline:\n"
+        "  name: wrong-type-list\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: data/access.log }\n"
+        "  stages:\n"
+        "    - type: parse\n"
+        "      params: { format: clf }\n"
+        "    - type: project\n"
+        "      params: { fields: 400 }\n"
+        "  sink:\n"
+        "    type: console\n";
+
+    bool caughtWrongList = false;
+    try {
+        loader.loadFromString(yamlWrongList);
+    } catch (const ConfigValidationException&) {
+        caughtWrongList = true;
+    }
+    ASSERT_TRUE(caughtWrongList);
+
+    // Durum 3: Metin alanı 'path' için string yerine integer (404) verilmesi
+    std::string yamlWrongString =
+        "pipeline:\n"
+        "  name: wrong-type-string\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: data/access.log }\n"
+        "  stages:\n"
+        "    - type: parse\n"
+        "      params: { format: clf }\n"
+        "    - type: filter\n"
+        "      params: { field: path, op: \"startsWith\", value: 404 }\n"
+        "  sink:\n"
+        "    type: console\n";
+
+    bool caughtWrongStr = false;
+    try {
+        loader.loadFromString(yamlWrongString);
+    } catch (const ConfigValidationException&) {
+        caughtWrongStr = true;
+    }
+    ASSERT_TRUE(caughtWrongStr);
+}
+
+/**
+ * @brief 37. Test (Görev 6.5): Boş Bir İşlem Hattı (Empty Pipeline)
+ */
+TEST_CASE(test_37_loader_empty_pipeline) {
+    PipelineLoader loader;
+
+    // Durum 1: Tamamen boş YAML içeriği
+    bool caughtEmptyDoc = false;
+    try {
+        loader.loadFromString("   \n  # sadece yorum satiri \n");
+    } catch (const ConfigValidationException& e) {
+        caughtEmptyDoc = true;
+        ASSERT_TRUE(std::string(e.what()).find("Bos islem hatti") != std::string::npos);
+    }
+    ASSERT_TRUE(caughtEmptyDoc);
+
+    // Durum 2: 'stages: []' (hiç aşama içermeyen işlem hattı)
+    std::string yamlEmptyStages =
+        "pipeline:\n"
+        "  name: empty-stages\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: data/access.log }\n"
+        "  stages: []\n"
+        "  sink:\n"
+        "    type: file\n"
+        "    params: { path: out/errors.txt }\n";
+
+    bool caughtEmptyStages = false;
+    try {
+        loader.loadFromString(yamlEmptyStages);
+    } catch (const ConfigValidationException& e) {
+        caughtEmptyStages = true;
+        ASSERT_TRUE(std::string(e.what()).find("Bos islem hatti") != std::string::npos);
+    }
+    ASSERT_TRUE(caughtEmptyStages);
+
+    // Durum 3: 'source' veya 'sink' eksik olan işlem hattı
+    std::string yamlNoSink =
+        "pipeline:\n"
+        "  name: no-sink\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: data/access.log }\n"
+        "  stages:\n"
+        "    - type: parse\n"
+        "      params: { format: clf }\n";
+
+    bool caughtNoSink = false;
+    try {
+        loader.loadFromString(yamlNoSink);
+    } catch (const ConfigValidationException&) {
+        caughtNoSink = true;
+    }
+    ASSERT_TRUE(caughtNoSink);
+}
+
+/**
+ * @brief 38. Test (Görev 4): Üç Ayrı Yapılandırma Dosyasının Aynı Çalıştırılabilir Kodla
+ * Gerçekten Farklı Davranışlar ve Çıktılar Üretmesi
+ */
+TEST_CASE(test_38_three_config_files_produce_different_outputs) {
+    PipelineLoader loader;
+
+    // 1. Hata Raporu (configs/error-report.yaml -> out/errors.txt)
+    Pipeline<> pError = loader.loadFromFile("configs/error-report.yaml");
+    ASSERT_STR_EQ(pError.getName(), "error-report");
+    pError.run();
+
+    // 2. API Trafiği Veri Çıkarımı (configs/api-traffic.yaml -> out/api-traffic.txt)
+    Pipeline<> pApi = loader.loadFromFile("configs/api-traffic.yaml");
+    ASSERT_STR_EQ(pApi.getName(), "api-traffic");
+    pApi.run();
+
+    // 3. İstemci Bazında Bant Genişliği (configs/bandwidth-by-client.yaml -> out/bandwidth-by-client.txt)
+    Pipeline<> pBw = loader.loadFromFile("configs/bandwidth-by-client.yaml");
+    ASSERT_STR_EQ(pBw.getName(), "bandwidth-by-client");
+    pBw.run();
+
+    auto errLines = readFileLines("out/errors.txt");
+    auto apiLines = readFileLines("out/api-traffic.txt");
+    auto bwLines  = readFileLines("out/bandwidth-by-client.txt");
+
+    // Her üç çıktı da farklı satır sayısına ve farklı alan projeksiyonuna sahiptir
+    ASSERT_EQ(errLines.size(), 3); // 401, 404, 500
+    ASSERT_EQ(apiLines.size(), 5); // /api/login, /api/users, /api/orders, /api/pay, /api/session
+    ASSERT_EQ(bwLines.size(), 4);  // bytes >= 1024 olan istemciler
+
+    ASSERT_STR_EQ(errLines[0], "2026-09-29T07:01:05Z 192.168.1.15 401 /api/login");
+    ASSERT_STR_EQ(apiLines[0], "2026-09-29T07:01:05Z POST /api/login 401 512");
+    ASSERT_STR_EQ(bwLines[0],  "192.168.1.10 1024 /index.html 200");
+}
+
+/**
+ * @brief 39. Test (Görev 5): StageRegistry Veri Odaklı Dinamik Eklenti Kaydı (Plugin Extensibility)
+ */
+TEST_CASE(test_39_stage_registry_dynamic_plugin_registration) {
+    // Mevcut kodu değiştirmeden çalışma zamanında yeni bir aşama türü ('anonymize_ip') kaydediyoruz
+    class AnonymizeIpStage : public Stage<LogRecord, LogRecord> {
+    public:
+        void process(const LogRecord& in, Emitter<LogRecord>& out) override {
+            LogRecord masked = LogRecord::Builder()
+                .setTimestamp(in.timestamp())
+                .setClientIp("0.0.0.0")
+                .setMethod(in.method())
+                .setPath(in.path())
+                .setStatus(in.status())
+                .setBytes(in.bytes())
+                .setUserAgent(in.userAgent())
+                .setAttributes(in.attributes())
+                .setRaw(in.raw())
+                .build();
+            out.emit(masked);
+        }
+    };
+
+    StageRegistry customRegistry;
+    customRegistry.registerStage("anonymize_ip", [](const StageParams& params) -> Stage<LogRecord, LogRecord>* {
+        params.rejectUnknownParams({}, "stage (type: anonymize_ip)");
+        return new AnonymizeIpStage();
+    });
+
+    ASSERT_TRUE(customRegistry.hasStage("anonymize_ip"));
+
+    std::string yaml =
+        "pipeline:\n"
+        "  name: plugin-pipeline\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: tests/fixtures/test_access.log }\n"
+        "  stages:\n"
+        "    - type: parse\n"
+        "      params: { format: clf }\n"
+        "    - type: anonymize_ip\n"
+        "    - type: project\n"
+        "      params: { fields: [clientIp, status, path] }\n"
+        "  sink:\n"
+        "    type: file\n"
+        "    params: { path: tests/output/plugin_out.txt }\n";
+
+    PipelineLoader loader(customRegistry);
+    Pipeline<> p = loader.loadFromString(yaml);
+    p.run();
+
+    auto lines = readFileLines("tests/output/plugin_out.txt");
+    ASSERT_EQ(lines.size(), 6);
+    ASSERT_STR_EQ(lines[0], "0.0.0.0 200 /index.html");
+}
+
+/**
+ * @brief 40. Test: Aşama Akış Türü Uyumsuzluğu (Parse Öncesi Filter Kullanımı Hatası)
+ */
+TEST_CASE(test_40_loader_stage_stream_type_mismatch) {
+    std::string yaml =
+        "pipeline:\n"
+        "  name: filter-before-parse\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: data/access.log }\n"
+        "  stages:\n"
+        "    - type: filter\n"
+        "      params: { field: status, op: \">=\", value: 400 }\n"
+        "    - type: parse\n"
+        "      params: { format: clf }\n"
+        "  sink:\n"
+        "    type: console\n";
+
+    PipelineLoader loader;
+    bool caughtMismatch = false;
+    try {
+        loader.loadFromString(yaml);
+    } catch (const ConfigValidationException& e) {
+        caughtMismatch = true;
+        ASSERT_TRUE(std::string(e.what()).find("LogRecord") != std::string::npos);
+    }
+    ASSERT_TRUE(caughtMismatch);
+}
+
+/**
+ * @brief 41. Test: Bilinmeyen Source/Sink Türü ve Tanımsız Parametre Denetimi
+ */
+TEST_CASE(test_41_loader_unknown_source_sink_and_extra_params) {
+    PipelineLoader loader;
+
+    // Bilinmeyen source türü
+    bool caughtUnknownSource = false;
+    try {
+        loader.loadFromString(
+            "pipeline:\n"
+            "  name: bad-src\n"
+            "  source:\n"
+            "    type: kafka\n"
+            "  stages:\n"
+            "    - type: parse\n"
+            "      params: { format: clf }\n"
+            "  sink:\n"
+            "    type: console\n");
+    } catch (const ConfigValidationException&) {
+        caughtUnknownSource = true;
+    }
+    ASSERT_TRUE(caughtUnknownSource);
+
+    // Bilinmeyen sink türü
+    bool caughtUnknownSink = false;
+    try {
+        loader.loadFromString(
+            "pipeline:\n"
+            "  name: bad-sink\n"
+            "  source:\n"
+            "    type: file\n"
+            "    params: { path: data/access.log }\n"
+            "  stages:\n"
+            "    - type: parse\n"
+            "      params: { format: clf }\n"
+            "  sink:\n"
+            "    type: elasticsearch\n");
+    } catch (const ConfigValidationException&) {
+        caughtUnknownSink = true;
+    }
+    ASSERT_TRUE(caughtUnknownSink);
+
+    // Fazladan tanımsız parametre
+    bool caughtExtraParam = false;
+    try {
+        loader.loadFromString(
+            "pipeline:\n"
+            "  name: extra-param\n"
+            "  source:\n"
+            "    type: file\n"
+            "    params: { path: data/access.log, encoding: utf8 }\n"
+            "  stages:\n"
+            "    - type: parse\n"
+            "      params: { format: clf }\n"
+            "  sink:\n"
+            "    type: console\n");
+    } catch (const ConfigValidationException&) {
+        caughtExtraParam = true;
+    }
+    ASSERT_TRUE(caughtExtraParam);
+}
+
+/**
+ * @brief 42. Test: StageFactory Filter Operatörleri ve Alanlarının Kapsamlı Doğrulaması
+ */
+TEST_CASE(test_42_filter_factory_all_operators_and_fields) {
+    LogRecord rec = LogRecord::Builder()
+        .setClientIp("192.168.1.10")
+        .setMethod("POST")
+        .setPath("/api/v1/orders.json")
+        .setStatus(201)
+        .setBytes(2048)
+        .setUserAgent("Mozilla/5.0")
+        .build();
+
+    auto runSingleFilter = [&](const std::string& inlineParams) -> size_t {
+        ConfigValue cv = YamlConfigParser::parseInlineValue(inlineParams);
+        StageParams sp(cv.asMap());
+        std::unique_ptr<Stage<LogRecord, LogRecord>> stg(StageFactory::createFilterStage(sp));
+        CollectingEmitter<LogRecord> em;
+        stg->process(rec, em);
+        return em.size();
+    };
+
+    ASSERT_EQ(runSingleFilter("{ field: status, op: \"==\", value: 201 }"), 1);
+    ASSERT_EQ(runSingleFilter("{ field: status, op: \"!=\", value: 500 }"), 1);
+    ASSERT_EQ(runSingleFilter("{ field: bytes, op: \">\", value: 1000 }"), 1);
+    ASSERT_EQ(runSingleFilter("{ field: bytes, op: \"<\", value: 4096 }"), 1);
+    ASSERT_EQ(runSingleFilter("{ field: bytes, op: \"<=\", value: 2048 }"), 1);
+    ASSERT_EQ(runSingleFilter("{ field: path, op: \"startsWith\", value: \"/api\" }"), 1);
+    ASSERT_EQ(runSingleFilter("{ field: path, op: \"contains\", value: \"orders\" }"), 1);
+    ASSERT_EQ(runSingleFilter("{ field: path, op: \"endsWith\", value: \".json\" }"), 1);
+    ASSERT_EQ(runSingleFilter("{ field: method, op: \"==\", value: \"POST\" }"), 1);
+    ASSERT_EQ(runSingleFilter("{ field: clientIp, op: \"!=\", value: \"10.0.0.1\" }"), 1);
+}
+
+// ============================================================================
 // ANA TEST KOŞUCU (MAIN)
 // ============================================================================
 
 int main() {
     std::cout << "============================================================\n";
-    std::cout << " LogFlow Artim 3 - Birim ve Entegrasyon Test Paketi\n";
+    std::cout << " LogFlow Artim 4 - Birim ve Entegrasyon Test Paketi\n";
     std::cout << "============================================================\n";
 
     // Artım 2 Mevcut Testleri (1-15)
@@ -789,9 +1273,9 @@ int main() {
     RUN_TEST(test_14_hatali_bayt_degeri);
     RUN_TEST(test_15_collecting_emitter_metotlari);
 
-    // Artım 3 Yeni Testleri (16-32)
+    // Artım 3 Testleri (16-32)
     std::cout << "------------------------------------------------------------\n";
-    std::cout << " Artim 3: Yeni Asama ve Entegrasyon Testleri\n";
+    std::cout << " Artim 3: Asama ve Bilesilebilirlik Testleri\n";
     std::cout << "------------------------------------------------------------\n";
     RUN_TEST(test_16_predicate_filter_status);
     RUN_TEST(test_17_predicate_filter_path_prefix);
@@ -814,6 +1298,21 @@ int main() {
     RUN_TEST(test_30_integration_3_stage_pipeline_fixture);
     RUN_TEST(test_31_integration_composability_and_order_invariance);
     RUN_TEST(test_32_multiple_predicate_filters_chained);
+
+    // Artım 4 Yeni Testleri (33-42)
+    std::cout << "------------------------------------------------------------\n";
+    std::cout << " Artim 4: Yapilandirma Yukleyici ve Kayit Defteri Testleri\n";
+    std::cout << "------------------------------------------------------------\n";
+    RUN_TEST(test_33_loader_valid_configuration);
+    RUN_TEST(test_34_loader_unknown_stage_type);
+    RUN_TEST(test_35_loader_missing_parameter);
+    RUN_TEST(test_36_loader_wrong_parameter_type);
+    RUN_TEST(test_37_loader_empty_pipeline);
+    RUN_TEST(test_38_three_config_files_produce_different_outputs);
+    RUN_TEST(test_39_stage_registry_dynamic_plugin_registration);
+    RUN_TEST(test_40_loader_stage_stream_type_mismatch);
+    RUN_TEST(test_41_loader_unknown_source_sink_and_extra_params);
+    RUN_TEST(test_42_filter_factory_all_operators_and_fields);
 
     std::cout << "============================================================\n";
     std::cout << "Test Sonuclari: " << g_passCount << " Basarili, " << g_failCount << " Basarisiz\n";

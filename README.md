@@ -1,157 +1,187 @@
 # LogFlow - Yazılım Mimarisi Dönem Projesi
-## Artım 3: Bileşim — Filtreleme, Projeksiyon ve Pipeline Builder ★★
+## Artım 4: Yapılandırma Odaklı Birleştirme ve Aşama Kaydı ★★★
 
 - **Öğrenci Adı Soyadı:** YunusEmre Demirci  
 - **Öğrenci Numarası:** 2404040249  
 - **Ders:** Yazılım Tasarımı ve Mimarisi  
-- **Sürüm Etiketi:** `v3`  
+- **Sürüm Etiketi:** `v4`  
 - **GitHub Deposu:** [DolphinBlacksmith/ym_logflowPipeline](https://github.com/DolphinBlacksmith/ym_logflowPipeline)
 
 ---
 
 ## 1. Mimari Odak ve Hedefler
 
-LogFlow projesinin 3. Artımında sistem, basit bir 3 parçalı boru hattından **dinamik olarak bileşebilen (composable), modüler ve akıcı bir boru hattı mimarisine** yükseltilmiştir:
+LogFlow projesinin 4. Artımında, boru hattı mimarisinin tanımı (topoloji) ile gerçekleştirimi (C++ sınıfları) birbirinden tamamen ayrılmıştır:
 
-1. **Aşamaların Özgürce Bileşimi:** Aşamaların (`Stage`) herhangi bir sırada ve herhangi bir sayıda zincirlenebildiğini kanıtlamak.
-2. **Akıcı PipelineBuilder:** 4. Haftada yerini dinamik yapılandırmaya (configuration) bırakacak olan kurucu mekanizmayı (`PipelineBuilder`) geliştirmek.
-3. **Filtre ve Dönüştürücü Özdeşliği:** Kayıtları eleyen bir filtre (`PredicateFilterStage`) ile kayıtları dönüştüren bir filtrenin (`ProjectionStage`) aynı soyut mimari öğe (`Stage<I, O>`) olduğunu kavramak.
-4. **Veri Minimizasyonu ve Gizlilik:** `ProjectionStage` ile analize gereksinim duyulmayan kişisel verilerin (IP, User-Agent) erken aşamada ayıklanmasını sağlamak.
-5. **Kaynak Yönetimi ve Yaşam Döngüsü:** `FileSink` ve yaşam döngüsü kancaları (`open()` / `close()`) ile dosya tanıtıcılarını ve tampon bellekleri (buffer) sızıntısız yönetmek.
-6. **Sıralama Deneyinin Belgelenmesi:** Filtreleme ve projeksiyon aşamalarının sırasının değiştirilmesinin sonuçlara ve performansa etkisini `ARCHITECTURE.md` belgesinde deneysel olarak kanıtlamak.
+1. **Bildirimsel Yapılandırma (Declarative Configuration):** İşlem hattı topolojisi (Source, Stages, Sink ve parametreleri) YAML yapılandırma dosyalarına taşınmıştır.
+2. **Veri Odaklı Eklenti / Kayıt Defteri (`StageRegistry` & `StageFactory`):** Sabit kodlanmış `switch` veya `if-else` blokları kullanılmadan, aşama türü adlarını ilgili fabrika fonksiyonlarına eşleyen veri odaklı bir kayıt sistemi geliştirilmiştir.
+3. **Yeniden Derlemeden Yeni Boru Hattı (Zero Recompilation Milestone):** Değiştirilmemiş aynı `./logflow` çalıştırılabilir dosyası, üç farklı YAML yapılandırma dosyası kullanılarak üç farklı çıktı üretir.
+4. **Yapılandırma Zamanı Tür Denetimi (Fail Fast, Fail Loudly):** Eksik parametre, yanlış türde parametre, bilinmeyen aşama türü veya boş işlem hattı durumlarında herhangi bir veri işlenmeden önce açık ve uygulanabilir hata mesajları üretilir.
 
 ---
 
-## 2. Yeni Geliştirilen Bileşenler (~40 Satır Altında)
+## 2. Artım 4 Bileşenleri
 
-Ödev yönergesine uygun olarak geliştirilen üç yeni aşama da temiz, odaklanmış ve 40 satırın altındadır:
-
-| Bileşen | Taban Arayüz | Satır | Sorumluluk ve Mimari Rol |
-|---|---|:---:|---|
-| [`PredicateFilterStage.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PredicateFilterStage.hpp) | `Stage<LogRecord, LogRecord>` | **38** | Bir kaydı yalnızca `Predicate<LogRecord>` koşulu sağlanıyorsa iletir. `status >= 400`, `path startsWith /api`, zaman damgası aralığı veya serbest lambda alır. |
-| [`ProjectionStage.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ProjectionStage.hpp) | `Stage<LogRecord, LogRecord>` | **28** | Her kaydı seçilen alanların bir alt kümesine indirger. Çıktı boyutunu azaltır ve kişisel verileri maskeler (veri minimizasyonu). |
-| [`FileSink.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/FileSink.hpp) | `Sink<LogRecord>` | **37** | Bir çıktı dosyasına yazar; `open()` ve `close()` metotlarını doğru biçimde uygulayarak tamponda kalan çıktının kaybolmasını önler. |
-| [`PipelineBuilder.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PipelineBuilder.hpp) | Kurucu Sınıf | **95** | Akıcı (fluent) arayüz ile derleme zamanında tip güvenliği sunan ve aşamaları birbirine bağlayan kurucu. |
-
----
-
-## 3. Akıcı Boru Hattı Kullanımı (Fluent PipelineBuilder)
-
-Aşamalar istenilen sayıda ve sırada birbirine bağlanabilir:
-
-```cpp
-Pipeline p = PipelineBuilder::from(new FileLineSource("data/access.log"))
-    .via(new ParserStage())
-    .via(new PredicateFilterStage([](const LogRecord& r) { return r.status() >= 400; }))
-    .via(new ProjectionStage({"timestamp", "clientIp", "status", "path"}))
-    .to(new FileSink("output/filtered.log"));
-
-p.run();
-```
-
-### Yaşam Döngüsü Kancaları (Lifecycle Hooks)
-- `Pipeline::run()` çağrıldığında:
-  1. `sink->open()` ve tüm `stage->open()` kancaları çalışır.
-  2. `source->produce()` veri akışını tetikler; reaktif olarak aşamalar işletilir.
-  3. İşlem tamamlandığında (veya bir hata fırlatıldığında), tüm aşamaların `close()` metotları **ters sırada** çalıştırılır ve arabellekler diske güvenle yazılır.
+| Bileşen / Dosya | Sorumluluk ve Mimari Rol |
+|---|---|
+| [`StageFactory.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/StageFactory.hpp) | Tür güvenli `ConfigValue`, parametre doğrulayıcı `StageParams`, `ConfigValidationException` ve bileşen fabrika metotlarını (`createFileSource`, `createParseStage`, `createFilterStage`, `createProjectStage`, `createFileSink`, `createConsoleSink`) içerir. |
+| [`StageRegistry.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/StageRegistry.hpp) | Aşama, kaynak ve hedef türlerini `std::map` tabanlı tek bir kayıt tablosunda tutar (`switch` içermez). Çalışma zamanında dinamik eklenti kaydını (`registerStage`) ve `REGISTER_LOGFLOW_STAGE` makrosunu destekler. |
+| [`PipelineLoader.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PipelineLoader.hpp) | YAML yapılandırma dosyasını okur (`YamlConfigParser`), topolojiyi ve parametreleri doğrular, `StageRegistry` üzerinden aşamaları bağlayarak çalıştırılabilir bir `Pipeline` nesnesi döndürür. |
+| [`configs/error-report.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/error-report.yaml) | **1. Yapılandırma (Hata Raporu):** `status >= 400` olan hata kayıtlarını filtreler ve `[timestamp, clientIp, status, path]` alanlarını `out/errors.txt` dosyasına yazar. |
+| [`configs/api-traffic.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/api-traffic.yaml) | **2. Yapılandırma (API Trafiği Veri Çıkarımı):** `path startsWith "/api"` olan istekleri filtreler ve `[timestamp, method, path, status, bytes]` alanlarını `out/api-traffic.txt` dosyasına yazar. |
+| [`configs/bandwidth-by-client.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/bandwidth-by-client.yaml) | **3. Yapılandırma (İstemci Bazında Bant Genişliği):** `bytes >= 1024` olan yüksek boyutlu yanıtları filtreler ve `[clientIp, bytes, path, status]` alanlarını `out/bandwidth-by-client.txt` dosyasına yazar. |
 
 ---
 
-## 4. Komut Satırı Arayüzü (CLI Argument Handling)
+## 3. Çalıştırma Kılavuzu (`--config`)
 
-`main.cpp` ile derlenen `logflow` ikili dosyası yapılandırılabilir parametrelere sahiptir:
-
-```bash
-# 1. Yardım Menüsü
-./logflow --help
-
-# 2. Standart Okuma ve Ayrıştırma (ConsoleSink)
-./logflow data/access-small.log
-
-# 3. Durum Kodu, Yol Ön-eki, Projeksiyon ve Dosya Çıktısı (FileSink)
-./logflow data/access-small.log --min-status 400 --path-prefix /api --fields timestamp,clientIp,status --out output/filtered.log
-
-# 4. Aşama Sıralama Seçeneği (Deney Modu)
-./logflow data/access-small.log --min-status 400 --fields timestamp,status --order filter-first --out output/a.log
-./logflow data/access-small.log --min-status 400 --fields timestamp,status --order project-first --out output/b.log
-```
-
----
-
-## 5. Sıralama Deneyi ve Mimari Rapor (`ARCHITECTURE.md`)
-
-Ödevin en kritik gereksinimi olan **Bileşilebilirlik ve Sıralama Deneyi**, 25.000 satırlık sentetik erişim günlüğü üzerinde `scripts/run_experiment.py` betiği ile yürütülmüş ve [`ARCHITECTURE.md`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ARCHITECTURE.md) dosyasında belgelenmiştir.
-
-### Temel Çıkarımlar
-1. **Ayrıştırmadan Önce Filtrelemek İmkansızdır:** Ham metin (`std::string`) durum kodu veya yol semantiğini içermez. String araması `False Positive` üretir. Bu yüzden `ParserStage` her zaman ilk adımdır.
-2. **Çıktı Özdeşliği (Bileşilebilirlik Kanıtı):**
-   - Sıra A: `Parser -> Filter -> Projection -> FileSink`
-   - Sıra B: `Parser -> Projection -> Filter -> FileSink`
-   - **Sonuç:** Her iki sıra da **birebir aynı 247.389 baytlık çıktıyı ve aynı SHA-256 özetini (`08562754...19a321f`)** üretmiştir.
-3. **Performans ve Bellek Ödünleşimi:**
-   - Sıra A'da (Filter-First), elenen 20.147 satır için gereksiz `ProjectionStage` nesne kopyalama maliyeti **ödenmemiştir**.
-   - Sıra B'de (Project-First), 20.147 nesne boş yere dönüştürülüp anında çöpe atılmıştır.
-   - Bu nedenle varsayılan mimari tercih **Filter-First** olmalıdır.
-
----
-
-## 6. Test Paketi ve Kapsama Oranı
-
-Birim ve entegrasyon test paketimiz (`tests/test_runner.cpp`) **31 adet test senaryosu** barındırır:
-
-- **1-15:** Artım 2 geriye dönük uyumluluk testleri (Geçerli satır, hatalı durum, boşluk, tırnaklı UA, builder vb.)
-- **16-20:** `PredicateFilterStage` testleri (status, path-prefix, timestamp range, custom lambda, kayıt bütünlüğü)
-- **21-24:** `ProjectionStage` testleri (seçilen alanlar, veri minimizasyonu/gizlilik, toFormattedString, kurucular)
-- **25-27:** `FileSink` testleri (open/write/close, açılmadan yazmada hata, tampon boşaltma)
-- **28-29:** `PipelineBuilder` testleri (akıcı zincirleme, yaşam döngüsü kancalarının sırası)
-- **30:** **3 Aşamalı Entegrasyon Testi:** Test fixture üzerinde okuyan, ayrıştıran, filtreleyen, projeksiyon uygulayan ve dosyaya yazan pipeline doğrulaması.
-- **31:** **Bileşilebilirlik Entegrasyon Testi:** Sıra A ve Sıra B çıktılarının disk üzerinde %100 özdeşliğinin doğrulanması.
-
-### Test ve Kapsama Komutları
-
-```bash
-# Testleri derle ve çalıştır (31 Test)
-make test
-
-# GCOV Satır Kapsama Raporu Üret
-make coverage
-
-# 25.000 Satırlık Sıralama Deneyini Çalıştır
-make experiment
-```
-
-### GCOV Satır Kapsama Raporu (Line Coverage)
-```text
-File 'PredicateFilterStage.hpp':  Lines executed: 100.00%
-File 'ProjectionStage.hpp':       Lines executed: 100.00%
-File 'FileSink.hpp':              Lines executed: 100.00%
-File 'ParserStage.hpp':           Lines executed:  95.83%
-File 'PipelineBuilder.hpp':       Lines executed:  91.51%
-File 'Pipeline.hpp':              Lines executed:  88.10%
-File 'LogRecord.hpp':             Lines executed:  86.47%
----------------------------------------------------------
-GENEL SATIR KAPSAMA:              Lines executed:  94.82% (984 satır)
-```
-
----
-
-## 7. Derleme ve Çalıştırma Kılavuzu
-
-Proje standart C++17 derleyicisi (`g++`) ve `make` ile derlenir:
+Aynı çalıştırılabilir `./logflow` ikili dosyası, yeniden derlenmeden üç farklı yapılandırma dosyasıyla üç farklı çıktı üretir:
 
 ```bash
 # Projeyi derle
 make
 
-# Örnek dosyayı çalıştır
-make run
+# 1. Hata Raporu (out/errors.txt üretir)
+./logflow --config configs/error-report.yaml
+cat out/errors.txt
 
-# Filtrelenmiş çıktıyı çalıştır ve gör
-make run-filtered
+# 2. API Trafiği Veri Çıkarımı (out/api-traffic.txt üretir)
+./logflow --config configs/api-traffic.yaml
+cat out/api-traffic.txt
 
-# Testleri çalıştır
+# 3. İstemci Bazında Bant Genişliği Çıkarımı (out/bandwidth-by-client.txt üretir)
+./logflow --config configs/bandwidth-by-client.yaml
+cat out/bandwidth-by-client.txt
+
+# Üç yapılandırmayı tek komutla peş peşe çalıştır
+make run-configs
+
+# İnteraktif Yapılandırma & Hata Denetimi Menüsü
+./logflow
+```
+
+### Üretilen Üç Farklı Çıktı
+
+- **`out/errors.txt` (`configs/error-report.yaml`):**
+  ```text
+  2026-09-29T07:01:05Z 192.168.1.15 401 /api/login
+  2026-09-29T07:03:15Z 192.168.1.25 404 /api/orders
+  2026-09-29T07:05:25Z 192.168.1.35 500 /api/pay
+  ```
+
+- **`out/api-traffic.txt` (`configs/api-traffic.yaml`):**
+  ```text
+  2026-09-29T07:01:05Z POST /api/login 401 512
+  2026-09-29T07:02:10Z GET /api/users 200 2048
+  2026-09-29T07:03:15Z GET /api/orders 404 256
+  2026-09-29T07:05:25Z POST /api/pay 500 128
+  2026-09-29T07:06:30Z DELETE /api/session 204 0
+  ```
+
+- **`out/bandwidth-by-client.txt` (`configs/bandwidth-by-client.yaml`):**
+  ```text
+  192.168.1.10 1024 /index.html 200
+  192.168.1.20 2048 /api/users 200
+  192.168.1.30 4096 /dashboard 200
+  192.168.1.45 8192 /static/bundle.js 200
+  ```
+
+---
+
+## 4. Yapılandırma Zamanı Hata Mesajı Örnekleri (Fail Fast, Fail Loudly)
+
+Sistem, herhangi bir veri satırı işlenmeden önce yapılandırma hatalarını yakalar ve açık, uygulanabilir (actionable) hata mesajları üretir:
+
+### Örnek 1: Bilinmeyen Bir Aşama Türü (`Unknown Stage Type`)
+- **Hatalı Yapılandırma:**
+  ```yaml
+  stages:
+    - type: parse
+      params: { format: clf }
+    - type: geoip_lookup
+      params: { db: city.mmdb }
+  ```
+- **Üretilen Hata Mesajı:**
+  ```text
+  [Yapilandirma Hatasi] Bilinmeyen asama turu (Unknown stage type): 'geoip_lookup'. Kayitli gecerli asama turleri: [filter, parse, project].
+  ```
+
+### Örnek 2: Eksik Zorunlu Parametre (`Missing Required Parameter`)
+- **Hatalı Yapılandırma (`value` parametresi unutulmuş):**
+  ```yaml
+  stages:
+    - type: filter
+      params: { field: status, op: ">=" }
+  ```
+- **Üretilen Hata Mesajı:**
+  ```text
+  [Yapilandirma Hatasi] Eksik parametre (Missing parameter): 'stage (type: filter)' icinde zorunlu 'value' parametresi bulunamadi. Cozum: params bloguna 'value: <deger>' ekleyin.
+  ```
+
+### Örnek 3: Yanlış Türde Parametre (`Wrong Parameter Type`)
+- **Hatalı Yapılandırma (Sayısal `status` alanı için metin verilmiş):**
+  ```yaml
+  stages:
+    - type: filter
+      params: { field: status, op: ">=", value: "dort_yuz" }
+  ```
+- **Üretilen Hata Mesajı:**
+  ```text
+  [Yapilandirma Hatasi] Yanlis turde parametre (Wrong parameter type): 'stage (type: filter) [field=status]' icindeki 'value' parametresi 'integer (tamsayi)' turunde olmalidir, ancak 'string (metin)' ('dort_yuz') verildi.
+  ```
+
+### Örnek 4: Boş Bir İşlem Hattı (`Empty Pipeline`)
+- **Hatalı Yapılandırma (`stages: []`):**
+  ```yaml
+  pipeline:
+    name: empty-pipeline-demo
+    source: { type: file, params: { path: data/access.log } }
+    stages: []
+    sink: { type: file, params: { path: out/errors.txt } }
+  ```
+- **Üretilen Hata Mesajı:**
+  ```text
+  [Yapilandirma Hatasi] Bos islem hatti (Empty pipeline): 'pipeline.stages' listesi bos olamaz; en az bir asama (or. parse) icermelidir.
+  ```
+
+### Örnek 5: Aşama Akış Türü Uyumsuzluğu (`parse` Öncesinde `filter` Kullanımı)
+- **Hatalı Yapılandırma:**
+  ```yaml
+  stages:
+    - type: filter
+      params: { field: status, op: ">=", value: 400 }
+    - type: parse
+      params: { format: clf }
+  ```
+- **Üretilen Hata Mesajı:**
+  ```text
+  [Yapilandirma Hatasi] Asama siralama/tur uyumsuzlugu: 'filter' asamasi girdi olarak 'LogRecord' bekliyor, ancak mevcut akis turu 'string'. Cozum: 'filter' asamasindan once 'parse' asamasini ekleyin.
+  ```
+
+---
+
+## 5. Test Paketi (42 Birim ve Entegrasyon Testi)
+
+Test paketimiz (`tests/test_runner.cpp`) toplam **42 adet test senaryosu** içerir:
+
+- **1–15:** Artım 2 testleri (`ParserStage`, `LogRecord`, `CollectingEmitter`)
+- **16–32:** Artım 3 testleri (`PredicateFilterStage`, `ProjectionStage`, `FileSink`, `PipelineBuilder`, sıralama bağımsızlığı)
+- **33–42:** Artım 4 yükleyici ve kayıt defteri testleri:
+  - `test_33_loader_valid_configuration` (Geçerli bir yapılandırma)
+  - `test_34_loader_unknown_stage_type` (Bilinmeyen bir aşama türü)
+  - `test_35_loader_missing_parameter` (Eksik bir parametre)
+  - `test_36_loader_wrong_parameter_type` (Yanlış türde bir parametre)
+  - `test_37_loader_empty_pipeline` (Boş bir işlem hattı)
+  - `test_38_three_config_files_produce_different_outputs` (3 ayrı yapılandırma dosyasının 3 farklı çıktı üretmesi)
+  - `test_39_stage_registry_dynamic_plugin_registration` (`StageRegistry` dinamik eklenti kaydı)
+  - `test_40_loader_stage_stream_type_mismatch` (Akış türü uyumsuzluğu denetimi)
+  - `test_41_loader_unknown_source_sink_and_extra_params` (Bilinmeyen source/sink ve tanımsız parametre denetimi)
+  - `test_42_filter_factory_all_operators_and_fields` (`StageFactory` tüm operatör ve alan testleri)
+
+```bash
+# 42 testi derle ve çalıştır
 make test
 
-# Temizle
-make clean
+# GCOV Satır Kapsama Raporu Üret
+make coverage
 ```
