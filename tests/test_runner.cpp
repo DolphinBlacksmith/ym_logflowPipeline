@@ -16,6 +16,12 @@
 #include "../StageFactory.hpp"
 #include "../StageRegistry.hpp"
 #include "../PipelineLoader.hpp"
+#include "../PipelineExceptions.hpp"
+#include "../FailedRecord.hpp"
+#include "../ErrorPolicy.hpp"
+#include "../DeadLetterSink.hpp"
+#include "../ValidationStage.hpp"
+#include "../RunSummary.hpp"
 
 // Basit ve Şık Birim Test Makroları (Zero-dependency xUnit / JUnit stili)
 static int g_passCount = 0;
@@ -1248,12 +1254,470 @@ TEST_CASE(test_42_filter_factory_all_operators_and_fields) {
 }
 
 // ============================================================================
+// ARTIM 5: HATA YÖNETİMİ, DOĞRULAMA, DEAD-LETTER VE KAOS TESTLERİ (43-52)
+// ============================================================================
+
+/**
+ * @brief 43. Test (Görev 1): StageException (Kurtarılabilir) vs PipelineException (Kurtarılamaz)
+ */
+TEST_CASE(test_43_error_model_stage_vs_pipeline_exception) {
+    // 1. StageException: Tek bir kayıt işlenirken oluşan kurtarılabilir aşama hatası
+    StageException stgEx("parse", "bozuk_ham_satir", "TRUNCATED_LINE", "Kesilmis satir");
+    ASSERT_STR_EQ(stgEx.getStageName(), "parse");
+    ASSERT_STR_EQ(stgEx.getRawInput(), "bozuk_ham_satir");
+    ASSERT_STR_EQ(stgEx.getErrorCode(), "TRUNCATED_LINE");
+    ASSERT_TRUE(std::string(stgEx.what()).find("TRUNCATED_LINE") != std::string::npos);
+
+    // 2. PipelineException: İşlem hattının devam edemeyeceği kurtarılamaz hata (ör. okunamayan dosya)
+    FileLineSource missingSource("data/non_existent_file_12345.log");
+    CollectingEmitter<std::string> emitter;
+    bool caughtPipelineEx = false;
+    try {
+        missingSource.produce(emitter);
+    } catch (const PipelineException& e) {
+        caughtPipelineEx = true;
+        ASSERT_STR_EQ(e.getComponentName(), "FileLineSource");
+    }
+    ASSERT_TRUE(caughtPipelineEx);
+}
+
+/**
+ * @brief 44. Test (Görev 2): ErrorPolicy Ayrıştırma ve Mod Doğrulaması
+ */
+TEST_CASE(test_44_error_policy_parsing_and_modes) {
+    ErrorPolicy pFail = ErrorPolicy::parse("FAIL_FAST");
+    ASSERT_TRUE(pFail.isFailFast());
+    ASSERT_STR_EQ(pFail.toString(), "FAIL_FAST");
+
+    ErrorPolicy pSkip = ErrorPolicy::parse("SKIP");
+    ASSERT_TRUE(pSkip.isSkip());
+    ASSERT_STR_EQ(pSkip.toString(), "SKIP");
+
+    ErrorPolicy pDl = ErrorPolicy::parse("DEAD_LETTER");
+    ASSERT_TRUE(pDl.isDeadLetter());
+    ASSERT_STR_EQ(pDl.toString(), "DEAD_LETTER");
+
+    ErrorPolicy pRetry = ErrorPolicy::parse("RETRY(3)");
+    ASSERT_TRUE(pRetry.isRetry());
+    ASSERT_EQ(pRetry.maxRetries(), 3);
+    ASSERT_STR_EQ(pRetry.toString(), "RETRY(3)");
+
+    bool caughtInvalidPolicy = false;
+    try {
+        ErrorPolicy::parse("IGNORE_SILENTLY");
+    } catch (const PipelineException&) {
+        caughtInvalidPolicy = true;
+    }
+    ASSERT_TRUE(caughtInvalidPolicy);
+}
+
+/**
+ * @brief 45. Test (Görev 2): FAIL_FAST Politikası İlk Hatada Boru Hattını Durdurur
+ */
+TEST_CASE(test_45_policy_fail_fast_stops_pipeline) {
+    class MemoryLineSource : public Source<std::string> {
+    public:
+        void produce(Emitter<std::string>& out) override {
+            out.emit("192.168.1.10 - - [29/Sep/2026:10:00:00 +0300] \"GET /ok1 HTTP/1.1\" 200 100");
+            out.emit("KESILMIS_BOZUK_SATIR_FAIL_FAST");
+            out.emit("192.168.1.11 - - [29/Sep/2026:10:01:00 +0300] \"GET /ok2 HTTP/1.1\" 200 200");
+        }
+    };
+
+    class MemoryRecordSink : public Sink<LogRecord> {
+    public:
+        std::vector<LogRecord> records;
+        void consume(const LogRecord& r) override { records.push_back(r); }
+    };
+
+    MemoryRecordSink* sink = new MemoryRecordSink();
+    Pipeline<> p = PipelineBuilder::from(new MemoryLineSource())
+        .via(new ParserStage(true), ErrorPolicy::failFast(), "parse")
+        .to(sink, false);
+    p.setPrintSummary(false);
+
+    bool abortedWithPipelineException = false;
+    try {
+        p.run();
+    } catch (const PipelineException& e) {
+        abortedWithPipelineException = true;
+        ASSERT_TRUE(std::string(e.what()).find("FAIL_FAST") != std::string::npos);
+    }
+
+    ASSERT_TRUE(abortedWithPipelineException);
+    // İlk geçerli kayıt işlenmiş, 2. kayıtta FAIL_FAST tetiklenmiş, 3. kayıt hiç işlenmemiştir
+    ASSERT_EQ(sink->records.size(), 1);
+    delete sink;
+}
+
+/**
+ * @brief 46. Test (Görev 2 & 4): SKIP Politikası Hatalı Kayıtları Atlar ve RunSummary'de Sayar
+ */
+TEST_CASE(test_46_policy_skip_counts_and_continues) {
+    std::string yaml =
+        "pipeline:\n"
+        "  name: skip-policy-test\n"
+        "  source:\n"
+        "    type: file\n"
+        "    params: { path: data/access-dirty.log }\n"
+        "  stages:\n"
+        "    - type: parse\n"
+        "      policy: SKIP\n"
+        "      params: { format: combined }\n"
+        "    - type: validate\n"
+        "      policy: SKIP\n"
+        "      params:\n"
+        "        requiredFields: [clientIp, method, path, timestamp]\n"
+        "        statusRange: [100, 599]\n"
+        "        bytesRange: [0, 104857600]\n"
+        "        timestampYearRange: [2000, 2035]\n"
+        "        validateIp: true\n"
+        "  sink:\n"
+        "    type: file\n"
+        "    params: { path: tests/output/skip_policy_out.txt }\n";
+
+    PipelineLoader loader;
+    Pipeline<> p = loader.loadFromString(yaml);
+    p.setPrintSummary(false);
+    RunSummary summary = p.run();
+
+    ASSERT_EQ(summary.getRecordsIn(), 11);
+    ASSERT_EQ(summary.getRecordsOut(), 3);
+    ASSERT_EQ(summary.getTotalSkipped(), 8);
+    ASSERT_EQ(summary.getDeadLetterCount(), 0);
+    ASSERT_EQ(summary.getDroppedAtStage("parse"), 5);
+    ASSERT_EQ(summary.getDroppedAtStage("validate"), 3);
+    ASSERT_TRUE(summary.isAccountingConsistent());
+}
+
+/**
+ * @brief 47. Test (Görev 2 & 3): DEAD_LETTER Politikası ve FailedRecord Tanılama Bağlamı
+ */
+TEST_CASE(test_47_policy_dead_letter_routes_failed_records) {
+    class DirtyMiniSource : public Source<std::string> {
+    public:
+        void produce(Emitter<std::string>& out) override {
+            out.emit("192.168.1.10 - - [29/Sep/2026:10:00:00 +0300] \"GET /valid HTTP/1.1\" 200 512");
+            out.emit("192.168.1.20 - - [29/Sep/2026:10:01:00 +0300] \"GET /truncated");
+            out.emit("192.168.1.30 - - [29/Sep/2026:10:02:00 +0300] \"GET /neg HTTP/1.1\" 200 -100");
+        }
+    };
+
+    class VecSink : public Sink<LogRecord> {
+    public:
+        std::vector<LogRecord> items;
+        void consume(const LogRecord& r) override { items.push_back(r); }
+    };
+
+    VecSink* mainSink = new VecSink();
+    DeadLetterMemorySink* dlSink = new DeadLetterMemorySink();
+
+    Pipeline<> p = PipelineBuilder::from(new DirtyMiniSource())
+        .withDeadLetterSink(dlSink, false)
+        .via(new ParserStage(true, true), ErrorPolicy::deadLetter(), "parse")
+        .via(new ValidationStage(), ErrorPolicy::deadLetter(), "validate")
+        .to(mainSink, false);
+    p.setPrintSummary(false);
+
+    RunSummary summary = p.run();
+
+    ASSERT_EQ(summary.getRecordsIn(), 3);
+    ASSERT_EQ(summary.getRecordsOut(), 1);
+    ASSERT_EQ(summary.getDeadLetterCount(), 2);
+    ASSERT_EQ(mainSink->items.size(), 1);
+    ASSERT_EQ(dlSink->size(), 2);
+
+    // 1. Başarısız kayıt: 'parse' aşamasından TRUNCATED_LINE
+    ASSERT_STR_EQ((*dlSink)[0].getStageName(), "parse");
+    ASSERT_STR_EQ((*dlSink)[0].getErrorCode(), "TRUNCATED_LINE");
+    ASSERT_TRUE((*dlSink)[0].getRawInput().find("/truncated") != std::string::npos);
+    ASSERT_TRUE(!(*dlSink)[0].getTimestampIso().empty());
+
+    // 2. Başarısız kayıt: 'validate' aşamasından NEGATIVE_BYTES
+    ASSERT_STR_EQ((*dlSink)[1].getStageName(), "validate");
+    ASSERT_STR_EQ((*dlSink)[1].getErrorCode(), "NEGATIVE_BYTES");
+    ASSERT_TRUE((*dlSink)[1].getRawInput().find("-100") != std::string::npos);
+
+    delete mainSink;
+    delete dlSink;
+}
+
+/**
+ * @brief 48. Test (Görev 2): RETRY(n) Politikası Geçici Hataları Kurtarır, Kalıcı Hataları Yönlendirir
+ */
+TEST_CASE(test_48_policy_retry_n_recovers_or_falls_back) {
+    // 1. kayıtta 2 kez başarısız olup 3. denemede (2. retry) başarılı olan,
+    // 2. kayıtta ise sürekli başarısız olan simüle edilmiş I/O zenginleştirme aşaması
+    class FlakyIoStage : public Stage<LogRecord, LogRecord> {
+    private:
+        int attemptsForFirst_ = 0;
+    public:
+        std::string stageTypeName() const override { return "io_enrich"; }
+        void process(const LogRecord& in, Emitter<LogRecord>& out) override {
+            if (in.path() == "/transient-error") {
+                attemptsForFirst_++;
+                if (attemptsForFirst_ < 3) {
+                    throw StageException("io_enrich", in.raw(), "IO_TIMEOUT", "Gecici baglanti zaman asimi");
+                }
+                out.emit(in);
+            } else {
+                throw StageException("io_enrich", in.raw(), "IO_PERMANENT", "Kalici sunucu hatasi");
+            }
+        }
+    };
+
+    class TwoRecordSource : public Source<LogRecord> {
+    public:
+        void produce(Emitter<LogRecord>& out) override {
+            out.emit(LogRecord::Builder().setPath("/transient-error").setRaw("raw_transient").setStatus(200).build());
+            out.emit(LogRecord::Builder().setPath("/permanent-error").setRaw("raw_permanent").setStatus(200).build());
+        }
+    };
+
+    class MemSink : public Sink<LogRecord> {
+    public:
+        std::vector<LogRecord> out;
+        void consume(const LogRecord& r) override { out.push_back(r); }
+    };
+
+    MemSink* mainSink = new MemSink();
+    DeadLetterMemorySink* dlSink = new DeadLetterMemorySink();
+
+    Pipeline<> p = PipelineBuilder::from(new TwoRecordSource())
+        .withDeadLetterSink(dlSink, false)
+        .via(new FlakyIoStage(), ErrorPolicy::retry(3, ErrorPolicyType::DEAD_LETTER), "io_enrich")
+        .to(mainSink, false);
+    p.setPrintSummary(false);
+
+    RunSummary summary = p.run();
+
+    // 1. kayıt 2 retry sonunda kurtarıldı -> mainSink'e ulaştı
+    // 2. kayıt 3 retry sonunda hala başarısız oldu -> dlSink'e yönlendirildi
+    // Toplam retry sayısı = 2 (ilk kayıt) + 3 (ikinci kayıt) = 5
+    ASSERT_EQ(summary.getRecordsIn(), 2);
+    ASSERT_EQ(summary.getRecordsOut(), 1);
+    ASSERT_EQ(summary.getDeadLetterCount(), 1);
+    ASSERT_EQ(summary.getTotalRetries(), 5);
+    ASSERT_EQ(dlSink->size(), 1);
+    ASSERT_STR_EQ((*dlSink)[0].getErrorCode(), "IO_PERMANENT");
+
+    delete mainSink;
+    delete dlSink;
+}
+
+/**
+ * @brief 49. Test (Görev 3): ValidationStage Tüm Bildirimsel Doğrulama Kuralları
+ */
+TEST_CASE(test_49_validation_stage_declarative_rules) {
+    ValidationRules rules;
+    rules.requiredFields = {"clientIp", "method", "path", "userAgent"};
+    rules.minStatus = 100;
+    rules.maxStatus = 599;
+    rules.minBytes = 0;
+    rules.maxBytes = 10000;
+    rules.minYear = 2000;
+    rules.maxYear = 2035;
+    rules.validateIp = true;
+    rules.allowedMethods = {"GET", "POST"};
+
+    ValidationStage validator(rules);
+    CollectingEmitter<LogRecord> emitter;
+
+    // 2026 yılına ait geçerli zaman damgası (1790665200 = 2026-09-29T07:00:00Z)
+    auto validTp = std::chrono::system_clock::from_time_t(1790665200);
+
+    // 1. Geçerli kayıt
+    LogRecord validRec = LogRecord::Builder()
+        .setTimestamp(validTp)
+        .setClientIp("192.168.1.10")
+        .setMethod("GET")
+        .setPath("/index.html")
+        .setStatus(200)
+        .setBytes(512)
+        .setUserAgent("Mozilla/5.0")
+        .setRaw("valid_raw")
+        .build();
+    validator.process(validRec, emitter);
+    ASSERT_EQ(emitter.size(), 1);
+
+    // 2. Eksik zorunlu alan (userAgent boş)
+    bool caughtMissingField = false;
+    try {
+        LogRecord r = LogRecord::Builder()
+            .setTimestamp(validTp).setClientIp("192.168.1.10").setMethod("GET")
+            .setPath("/").setStatus(200).setBytes(100).setUserAgent("").build();
+        validator.process(r, emitter);
+    } catch (const StageException& e) {
+        caughtMissingField = (e.getErrorCode() == "MISSING_REQUIRED_FIELD");
+    }
+    ASSERT_TRUE(caughtMissingField);
+
+    // 3. Geçersiz IP biçimi (999.999.999.999)
+    bool caughtBadIp = false;
+    try {
+        LogRecord r = LogRecord::Builder()
+            .setTimestamp(validTp).setClientIp("999.999.999.999").setMethod("GET")
+            .setPath("/").setStatus(200).setBytes(100).setUserAgent("UA").build();
+        validator.process(r, emitter);
+    } catch (const StageException& e) {
+        caughtBadIp = (e.getErrorCode() == "INVALID_IP_FORMAT");
+    }
+    ASSERT_TRUE(caughtBadIp);
+
+    // 4. Negatif bayt sayısı (-512)
+    bool caughtNegBytes = false;
+    try {
+        LogRecord r = LogRecord::Builder()
+            .setTimestamp(validTp).setClientIp("10.0.0.1").setMethod("GET")
+            .setPath("/").setStatus(200).setBytes(-512).setUserAgent("UA").build();
+        validator.process(r, emitter);
+    } catch (const StageException& e) {
+        caughtNegBytes = (e.getErrorCode() == "NEGATIVE_BYTES");
+    }
+    ASSERT_TRUE(caughtNegBytes);
+
+    // 5. 1970 tarihli zaman damgası (tutarsız yıl)
+    bool caught1970 = false;
+    try {
+        auto tp1970 = std::chrono::system_clock::from_time_t(5);
+        LogRecord r = LogRecord::Builder()
+            .setTimestamp(tp1970).setClientIp("10.0.0.1").setMethod("GET")
+            .setPath("/").setStatus(200).setBytes(100).setUserAgent("UA").build();
+        validator.process(r, emitter);
+    } catch (const StageException& e) {
+        caught1970 = (e.getErrorCode() == "TIMESTAMP_OUT_OF_RANGE");
+    }
+    ASSERT_TRUE(caught1970);
+
+    // 6. 2099 tarihli zaman damgası (tutarsız yıl)
+    bool caught2099 = false;
+    try {
+        // 2099-01-01 ~ 4070908800
+        auto tp2099 = std::chrono::system_clock::from_time_t(static_cast<time_t>(4070908800LL));
+        LogRecord r = LogRecord::Builder()
+            .setTimestamp(tp2099).setClientIp("10.0.0.1").setMethod("GET")
+            .setPath("/").setStatus(200).setBytes(100).setUserAgent("UA").build();
+        validator.process(r, emitter);
+    } catch (const StageException& e) {
+        caught2099 = (e.getErrorCode() == "TIMESTAMP_OUT_OF_RANGE");
+    }
+    ASSERT_TRUE(caught2099);
+}
+
+/**
+ * @brief 50. Test (Görev 5): ParserStage UTF-8 Olmayan Veri ve 100 KB'lık Tek Satır Tespiti
+ */
+TEST_CASE(test_50_parser_stage_utf8_and_100kb_oversized_line) {
+    ParserStage parser(true, true, 65536);
+    CollectingEmitter<LogRecord> emitter;
+
+    // 1. UTF-8 olmayan bayt dizisi (\xFF\xFE\xC0\xAF)
+    std::string badUtf8 = "192.168.1.10 - - [29/Sep/2026:10:00:00 +0300] \"GET /bad-\xff\xfe\xc0\xaf HTTP/1.1\" 200 100";
+    bool caughtNonUtf8 = false;
+    try {
+        parser.process(badUtf8, emitter);
+    } catch (const StageException& e) {
+        caughtNonUtf8 = (e.getErrorCode() == "NON_UTF8_BYTES");
+    }
+    ASSERT_TRUE(caughtNonUtf8);
+
+    // 2. 100 KB'lık tek satır (102,400 bayt)
+    std::string oversizedLine = "192.168.1.10 - - [29/Sep/2026:10:00:00 +0300] \"GET /" + std::string(102400, 'A') + " HTTP/1.1\" 200 102400";
+    bool caughtOversized = false;
+    try {
+        parser.process(oversizedLine, emitter);
+    } catch (const StageException& e) {
+        caughtOversized = (e.getErrorCode() == "OVERSIZED_LINE");
+    }
+    ASSERT_TRUE(caughtOversized);
+    ASSERT_EQ(emitter.size(), 0);
+}
+
+/**
+ * @brief 51. Test (Görev 5): Kaos Testi — data/access-dirty.log Uçtan Uca İşleme ve Sayısal Mutabakat
+ *
+ * Gereksinim:
+ * "Bilerek bozulmuş bir test dosyası sağlayın (data/access-dirty.log: kesilmiş satırlar,
+ * UTF-8 olmayan veri(byte), negatif veri(byte) sayıları, 1970 ve 2099 tarihli zaman damgaları,
+ * 100 KB'lık tek satır ve boş dosya). İşlem hattı tamamlanmalı, geçerli kayıtlar için doğru
+ * çıktıyı üretmeli ve tüm hatalı kayıtları hesaba katmalıdır."
+ */
+TEST_CASE(test_51_chaos_test_dirty_log_end_to_end) {
+    PipelineLoader loader;
+    Pipeline<> p = loader.loadFromFile("configs/chaos-test.yaml");
+    p.setPrintSummary(false);
+
+    RunSummary summary = p.run();
+
+    // 1. Özet sayılarının tam mutabakatı (Hocanın access-dirty.log fixture dosyası: 11 satır)
+    // - 3 geçerli kayıt -> ana hedefe (out/clean-access.log)
+    // - 5 kayıt 'parse' aşamasında reddedilir (1 yorum satırı, 2 kesilmiş satır, 1 UTF-8 olmayan bayt, 1 100 KiB satır)
+    // - 3 kayıt 'validate' aşamasında reddedilir (1 negatif bayt -45, 1 yıl 1970, 1 yıl 2099)
+    // Toplam Dead-Letter = 8 kayıt (out/dead-letter.log)
+    ASSERT_EQ(summary.getRecordsIn(), 11);
+    ASSERT_EQ(summary.getRecordsOut(), 3);
+    ASSERT_EQ(summary.getDeadLetterCount(), 8);
+    ASSERT_EQ(summary.getTotalDropped(), 8);
+    ASSERT_EQ(summary.getDroppedAtStage("parse"), 5);
+    ASSERT_EQ(summary.getDroppedAtStage("validate"), 3);
+    ASSERT_EQ(summary.getDroppedAtStage("project"), 0);
+    ASSERT_TRUE(summary.isAccountingConsistent());
+    ASSERT_TRUE(summary.getElapsedMicroseconds() >= 0);
+
+    // 2. Ana hedef (out/clean-access.log) ve Dead-Letter hedefi (out/dead-letter.log) dosya doğrulaması
+    auto cleanLines = readFileLines("out/clean-access.log");
+    auto dlLines    = readFileLines("out/dead-letter.log");
+
+    ASSERT_EQ(cleanLines.size(), summary.getRecordsOut());
+    ASSERT_EQ(dlLines.size(), summary.getDeadLetterCount());
+
+    ASSERT_STR_EQ(cleanLines[0], "2026-10-15T10:15:32Z 192.0.2.10 GET /index.html 200 1234");
+    ASSERT_STR_EQ(cleanLines[1], "2026-10-15T10:16:05Z 198.51.100.22 POST /api/login 401 287");
+    ASSERT_STR_EQ(cleanLines[2], "2026-10-15T10:17:41Z 203.0.113.7 GET /images/logo.png 304 0");
+
+    // Dead-letter çıktısında tüm hata kodlarının yer aldığını doğrula
+    std::string allDlText;
+    for (const auto& l : dlLines) allDlText += l + "\n";
+
+    ASSERT_TRUE(allDlText.find("code=COMMENT_OR_HEADER_LINE") != std::string::npos);
+    ASSERT_TRUE(allDlText.find("code=TRUNCATED_LINE") != std::string::npos);
+    ASSERT_TRUE(allDlText.find("code=NON_UTF8_BYTES") != std::string::npos);
+    ASSERT_TRUE(allDlText.find("code=OVERSIZED_LINE") != std::string::npos);
+    ASSERT_TRUE(allDlText.find("code=NEGATIVE_BYTES") != std::string::npos);
+    ASSERT_TRUE(allDlText.find("code=TIMESTAMP_OUT_OF_RANGE") != std::string::npos);
+}
+
+/**
+ * @brief 52. Test (Görev 5): Kaos Testi — Boş Dosya (data/access-empty.log) Sınır Durumu
+ */
+TEST_CASE(test_52_chaos_test_empty_file_edge_case) {
+    PipelineLoader loader;
+    Pipeline<> p = loader.loadFromFile("configs/empty-file-test.yaml");
+    p.setPrintSummary(false);
+
+    RunSummary summary = p.run();
+
+    ASSERT_EQ(summary.getRecordsIn(), 0);
+    ASSERT_EQ(summary.getRecordsOut(), 0);
+    ASSERT_EQ(summary.getDeadLetterCount(), 0);
+    ASSERT_EQ(summary.getTotalDropped(), 0);
+    ASSERT_TRUE(summary.isAccountingConsistent());
+
+    auto cleanLines = readFileLines("out/empty-clean.log");
+    auto dlLines    = readFileLines("out/empty-dead-letter.log");
+    ASSERT_EQ(cleanLines.size(), 0);
+    ASSERT_EQ(dlLines.size(), 0);
+    std::remove("out/empty-clean.log");
+    std::remove("out/empty-dead-letter.log");
+}
+
+// ============================================================================
 // ANA TEST KOŞUCU (MAIN)
 // ============================================================================
 
 int main() {
     std::cout << "============================================================\n";
-    std::cout << " LogFlow Artim 4 - Birim ve Entegrasyon Test Paketi\n";
+    std::cout << " LogFlow Artim 5 - Birim ve Entegrasyon Test Paketi\n";
     std::cout << "============================================================\n";
 
     // Artım 2 Mevcut Testleri (1-15)
@@ -1313,6 +1777,21 @@ int main() {
     RUN_TEST(test_40_loader_stage_stream_type_mismatch);
     RUN_TEST(test_41_loader_unknown_source_sink_and_extra_params);
     RUN_TEST(test_42_filter_factory_all_operators_and_fields);
+
+    // Artım 5 Yeni Testleri (43-52)
+    std::cout << "------------------------------------------------------------\n";
+    std::cout << " Artim 5: Hata Yonetimi, Dogrulama, Dead-Letter ve Kaos Testleri\n";
+    std::cout << "------------------------------------------------------------\n";
+    RUN_TEST(test_43_error_model_stage_vs_pipeline_exception);
+    RUN_TEST(test_44_error_policy_parsing_and_modes);
+    RUN_TEST(test_45_policy_fail_fast_stops_pipeline);
+    RUN_TEST(test_46_policy_skip_counts_and_continues);
+    RUN_TEST(test_47_policy_dead_letter_routes_failed_records);
+    RUN_TEST(test_48_policy_retry_n_recovers_or_falls_back);
+    RUN_TEST(test_49_validation_stage_declarative_rules);
+    RUN_TEST(test_50_parser_stage_utf8_and_100kb_oversized_line);
+    RUN_TEST(test_51_chaos_test_dirty_log_end_to_end);
+    RUN_TEST(test_52_chaos_test_empty_file_edge_case);
 
     std::cout << "============================================================\n";
     std::cout << "Test Sonuclari: " << g_passCount << " Basarili, " << g_failCount << " Basarisiz\n";

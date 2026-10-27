@@ -18,6 +18,8 @@ private:
 public:
     explicit PredicateFilterStage(Predicate pred) : predicate(std::move(pred)) {}
 
+    std::string stageTypeName() const override { return "filter"; }
+
     void process(const LogRecord& input, Emitter<LogRecord>& out) override {
         if (predicate && predicate(input)) {
             out.emit(input);

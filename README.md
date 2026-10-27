@@ -1,187 +1,79 @@
 # LogFlow - Yazılım Mimarisi Dönem Projesi
-## Artım 4: Yapılandırma Odaklı Birleştirme ve Aşama Kaydı ★★★
+## Artım 5: Hata Yönetimi, Doğrulama ve Dead-Letter Kanalı ★★★
 
 - **Öğrenci Adı Soyadı:** YunusEmre Demirci  
 - **Öğrenci Numarası:** 2404040249  
 - **Ders:** Yazılım Tasarımı ve Mimarisi  
-- **Sürüm Etiketi:** `v4`  
+- **Sürüm Etiketi:** `v5`  
 - **GitHub Deposu:** [DolphinBlacksmith/ym_logflowPipeline](https://github.com/DolphinBlacksmith/ym_logflowPipeline)
 
 ---
 
 ## 1. Mimari Odak ve Hedefler
 
-LogFlow projesinin 4. Artımında, boru hattı mimarisinin tanımı (topoloji) ile gerçekleştirimi (C++ sınıfları) birbirinden tamamen ayrılmıştır:
+LogFlow projesinin 5. Artımında hata yönetimi mimari bir konu olarak ele alınmış, ikincil kanallar (Dead-Letter) ve hata yalıtımı uygulanmıştır:
 
-1. **Bildirimsel Yapılandırma (Declarative Configuration):** İşlem hattı topolojisi (Source, Stages, Sink ve parametreleri) YAML yapılandırma dosyalarına taşınmıştır.
-2. **Veri Odaklı Eklenti / Kayıt Defteri (`StageRegistry` & `StageFactory`):** Sabit kodlanmış `switch` veya `if-else` blokları kullanılmadan, aşama türü adlarını ilgili fabrika fonksiyonlarına eşleyen veri odaklı bir kayıt sistemi geliştirilmiştir.
-3. **Yeniden Derlemeden Yeni Boru Hattı (Zero Recompilation Milestone):** Değiştirilmemiş aynı `./logflow` çalıştırılabilir dosyası, üç farklı YAML yapılandırma dosyası kullanılarak üç farklı çıktı üretir.
-4. **Yapılandırma Zamanı Tür Denetimi (Fail Fast, Fail Loudly):** Eksik parametre, yanlış türde parametre, bilinmeyen aşama türü veya boş işlem hattı durumlarında herhangi bir veri işlenmeden önce açık ve uygulanabilir hata mesajları üretilir.
+1. **Hata Modeli (`StageException` vs `PipelineException`):** Tek bir kayıt işlenirken oluşan kurtarılabilir hatalar (`StageException`) ile işlem hattının devam edemeyeceği kurtarılamaz sistem/yapılandırma/G-Ç hataları (`PipelineException`) birbirinden ayrılmıştır.
+2. **Aşama Başına Ayarlanabilir Hata Politikaları (`ErrorPolicy`):** Her aşama için YAML yapılandırma dosyasında `FAIL_FAST`, `SKIP`, `DEAD_LETTER` ve `RETRY(n)` politikaları seçilebilir hale getirilmiştir.
+3. **Topolojik Hata Yönlendirmesi ve Dead-Letter Kanalı (`FailedRecord` & `DeadLetterSink`):** Hatalı kayıtlar aşama içindeki `try/catch` ile sessizce yutulmaz; topolojik yönlendirici tarafından `FailedRecord(rawInput, stageName, exception, timestamp)` nesnesine dönüştürülerek bağımsız ikincil çıktı kanalına (`DeadLetterFileSink` / `DeadLetterConsoleSink`) yönlendirilir.
+4. **Bildirimsel Doğrulama Aşaması (`ValidationStage`):** Zorunlu alanlar (`requiredFields`), sayısal aralıklar (`statusRange`, `bytesRange`), zaman damgası tutarlılığı (`timestampYearRange`) ve IP biçimi (`validateIp`) kurallarını bildirimsel olarak denetler.
+5. **Çalıştırma Özeti (`RunSummary`) ve Kaos Testi (`data/access-dirty.log`):** Her çalıştırmanın sonunda gelen kayıt sayısı, çıkan kayıt sayısı, aşama bazında atılan kayıt sayısı, dead-letter kanalına gönderilen kayıt sayısı ve gerçek geçen süre (wall-clock time + throughput) tam mutabakatla raporlanır.
 
 ---
 
-## 2. Artım 4 Bileşenleri
+## 2. Artım 5 Yeni ve Güncellenen Bileşenler
 
 | Bileşen / Dosya | Sorumluluk ve Mimari Rol |
 |---|---|
-| [`StageFactory.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/StageFactory.hpp) | Tür güvenli `ConfigValue`, parametre doğrulayıcı `StageParams`, `ConfigValidationException` ve bileşen fabrika metotlarını (`createFileSource`, `createParseStage`, `createFilterStage`, `createProjectStage`, `createFileSink`, `createConsoleSink`) içerir. |
-| [`StageRegistry.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/StageRegistry.hpp) | Aşama, kaynak ve hedef türlerini `std::map` tabanlı tek bir kayıt tablosunda tutar (`switch` içermez). Çalışma zamanında dinamik eklenti kaydını (`registerStage`) ve `REGISTER_LOGFLOW_STAGE` makrosunu destekler. |
-| [`PipelineLoader.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PipelineLoader.hpp) | YAML yapılandırma dosyasını okur (`YamlConfigParser`), topolojiyi ve parametreleri doğrular, `StageRegistry` üzerinden aşamaları bağlayarak çalıştırılabilir bir `Pipeline` nesnesi döndürür. |
-| [`configs/error-report.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/error-report.yaml) | **1. Yapılandırma (Hata Raporu):** `status >= 400` olan hata kayıtlarını filtreler ve `[timestamp, clientIp, status, path]` alanlarını `out/errors.txt` dosyasına yazar. |
-| [`configs/api-traffic.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/api-traffic.yaml) | **2. Yapılandırma (API Trafiği Veri Çıkarımı):** `path startsWith "/api"` olan istekleri filtreler ve `[timestamp, method, path, status, bytes]` alanlarını `out/api-traffic.txt` dosyasına yazar. |
-| [`configs/bandwidth-by-client.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/bandwidth-by-client.yaml) | **3. Yapılandırma (İstemci Bazında Bant Genişliği):** `bytes >= 1024` olan yüksek boyutlu yanıtları filtreler ve `[clientIp, bytes, path, status]` alanlarını `out/bandwidth-by-client.txt` dosyasına yazar. |
+| [`PipelineExceptions.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PipelineExceptions.hpp) | Kurtarılabilir aşama kayıt hatası (`StageException`) ve kurtarılamaz işlem hattı hatası (`PipelineException`) sınıflarını tanımlar. |
+| [`FailedRecord.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/FailedRecord.hpp) | Dead-letter kanalında taşınan `FailedRecord(rawInput, stageName, exception, timestamp)` tanılama modelini tanımlar. |
+| [`ErrorPolicy.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ErrorPolicy.hpp) | `FAIL_FAST`, `SKIP`, `DEAD_LETTER` ve `RETRY(n)` aşama hata politikalarını temsil eder ve YAML'dan ayrıştırır. |
+| [`DeadLetterSink.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/DeadLetterSink.hpp) | `FailedRecord` nesnelerini ikincil hedefe yazan `DeadLetterFileSink`, `DeadLetterConsoleSink` ve `DeadLetterMemorySink` sınıflarını içerir. |
+| [`ValidationStage.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ValidationStage.hpp) | Zorunlu alanlar, sayısal aralıklar (negatif bayt tespiti), zaman damgası tutarlılığı (1970 ve 2099 tespiti) ve IPv4 biçimi doğrulamasını uygular. |
+| [`RunSummary.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/RunSummary.hpp) | Gelen/çıkan kayıt, aşama başına atılan kayıt, dead-letter sayıları, gerçek geçen süre ve saniye başına kayıt hızı (8–9. hafta temeli) özetini üretir. |
+| [`configs/chaos-test.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/chaos-test.yaml) | Bozuk log dosyasını (`data/access-dirty.log`) işleyip geçerli kayıtları `out/clean-access.log` ana hedefine, hatalı kayıtları `out/dead-letter.log` hedefine yönlendiren yapılandırma. |
+| [`data/access-dirty.log`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/data/access-dirty.log) | Kesilmiş satırlar, UTF-8 olmayan baytlar, negatif bayt sayıları, 1970 ve 2099 zaman damgaları, 100 KB'lık tek satır ve geçersiz IP içeren kaos testi verisi. |
 
 ---
 
-## 3. Çalıştırma Kılavuzu (`--config`)
-
-Aynı çalıştırılabilir `./logflow` ikili dosyası, yeniden derlenmeden üç farklı yapılandırma dosyasıyla üç farklı çıktı üretir:
+## 3. Çalıştırma Kılavuzu
 
 ```bash
 # Projeyi derle
 make
 
-# 1. Hata Raporu (out/errors.txt üretir)
-./logflow --config configs/error-report.yaml
-cat out/errors.txt
+# Kaos Testi: Bozuk log dosyasını (data/access-dirty.log) işle
+./logflow --config configs/chaos-test.yaml
 
-# 2. API Trafiği Veri Çıkarımı (out/api-traffic.txt üretir)
-./logflow --config configs/api-traffic.yaml
-cat out/api-traffic.txt
+# Ana hedefe ulaşan temiz kayıtları görüntüle (3 geçerli kayıt)
+cat out/clean-access.log
 
-# 3. İstemci Bazında Bant Genişliği Çıkarımı (out/bandwidth-by-client.txt üretir)
-./logflow --config configs/bandwidth-by-client.yaml
-cat out/bandwidth-by-client.txt
+# Dead-Letter hedefine yönlendirilen hatalı kayıtları görüntüle (8 hatalı kayıt)
+cat out/dead-letter.log
 
-# Üç yapılandırmayı tek komutla peş peşe çalıştır
-make run-configs
+# Boş dosya kaos testini (data/access-empty.log) çalıştır
+./logflow --config configs/empty-file-test.yaml
 
-# İnteraktif Yapılandırma & Hata Denetimi Menüsü
-./logflow
+# 52 Birim, Entegrasyon ve Kaos Testini Çalıştır
+make test
 ```
 
-### Üretilen Üç Farklı Çıktı
+### Kaos Testi Örnek Çalıştırma Özeti (`./logflow --config configs/chaos-test.yaml`)
 
-- **`out/errors.txt` (`configs/error-report.yaml`):**
-  ```text
-  2026-09-29T07:01:05Z 192.168.1.15 401 /api/login
-  2026-09-29T07:03:15Z 192.168.1.25 404 /api/orders
-  2026-09-29T07:05:25Z 192.168.1.35 500 /api/pay
-  ```
-
-- **`out/api-traffic.txt` (`configs/api-traffic.yaml`):**
-  ```text
-  2026-09-29T07:01:05Z POST /api/login 401 512
-  2026-09-29T07:02:10Z GET /api/users 200 2048
-  2026-09-29T07:03:15Z GET /api/orders 404 256
-  2026-09-29T07:05:25Z POST /api/pay 500 128
-  2026-09-29T07:06:30Z DELETE /api/session 204 0
-  ```
-
-- **`out/bandwidth-by-client.txt` (`configs/bandwidth-by-client.yaml`):**
-  ```text
-  192.168.1.10 1024 /index.html 200
-  192.168.1.20 2048 /api/users 200
-  192.168.1.30 4096 /dashboard 200
-  192.168.1.45 8192 /static/bundle.js 200
-  ```
-
----
-
-## 4. Yapılandırma Zamanı Hata Mesajı Örnekleri (Fail Fast, Fail Loudly)
-
-Sistem, herhangi bir veri satırı işlenmeden önce yapılandırma hatalarını yakalar ve açık, uygulanabilir (actionable) hata mesajları üretir:
-
-### Örnek 1: Bilinmeyen Bir Aşama Türü (`Unknown Stage Type`)
-- **Hatalı Yapılandırma:**
-  ```yaml
-  stages:
-    - type: parse
-      params: { format: clf }
-    - type: geoip_lookup
-      params: { db: city.mmdb }
-  ```
-- **Üretilen Hata Mesajı:**
-  ```text
-  [Yapilandirma Hatasi] Bilinmeyen asama turu (Unknown stage type): 'geoip_lookup'. Kayitli gecerli asama turleri: [filter, parse, project].
-  ```
-
-### Örnek 2: Eksik Zorunlu Parametre (`Missing Required Parameter`)
-- **Hatalı Yapılandırma (`value` parametresi unutulmuş):**
-  ```yaml
-  stages:
-    - type: filter
-      params: { field: status, op: ">=" }
-  ```
-- **Üretilen Hata Mesajı:**
-  ```text
-  [Yapilandirma Hatasi] Eksik parametre (Missing parameter): 'stage (type: filter)' icinde zorunlu 'value' parametresi bulunamadi. Cozum: params bloguna 'value: <deger>' ekleyin.
-  ```
-
-### Örnek 3: Yanlış Türde Parametre (`Wrong Parameter Type`)
-- **Hatalı Yapılandırma (Sayısal `status` alanı için metin verilmiş):**
-  ```yaml
-  stages:
-    - type: filter
-      params: { field: status, op: ">=", value: "dort_yuz" }
-  ```
-- **Üretilen Hata Mesajı:**
-  ```text
-  [Yapilandirma Hatasi] Yanlis turde parametre (Wrong parameter type): 'stage (type: filter) [field=status]' icindeki 'value' parametresi 'integer (tamsayi)' turunde olmalidir, ancak 'string (metin)' ('dort_yuz') verildi.
-  ```
-
-### Örnek 4: Boş Bir İşlem Hattı (`Empty Pipeline`)
-- **Hatalı Yapılandırma (`stages: []`):**
-  ```yaml
-  pipeline:
-    name: empty-pipeline-demo
-    source: { type: file, params: { path: data/access.log } }
-    stages: []
-    sink: { type: file, params: { path: out/errors.txt } }
-  ```
-- **Üretilen Hata Mesajı:**
-  ```text
-  [Yapilandirma Hatasi] Bos islem hatti (Empty pipeline): 'pipeline.stages' listesi bos olamaz; en az bir asama (or. parse) icermelidir.
-  ```
-
-### Örnek 5: Aşama Akış Türü Uyumsuzluğu (`parse` Öncesinde `filter` Kullanımı)
-- **Hatalı Yapılandırma:**
-  ```yaml
-  stages:
-    - type: filter
-      params: { field: status, op: ">=", value: 400 }
-    - type: parse
-      params: { format: clf }
-  ```
-- **Üretilen Hata Mesajı:**
-  ```text
-  [Yapilandirma Hatasi] Asama siralama/tur uyumsuzlugu: 'filter' asamasi girdi olarak 'LogRecord' bekliyor, ancak mevcut akis turu 'string'. Cozum: 'filter' asamasindan once 'parse' asamasini ekleyin.
-  ```
-
----
-
-## 5. Test Paketi (42 Birim ve Entegrasyon Testi)
-
-Test paketimiz (`tests/test_runner.cpp`) toplam **42 adet test senaryosu** içerir:
-
-- **1–15:** Artım 2 testleri (`ParserStage`, `LogRecord`, `CollectingEmitter`)
-- **16–32:** Artım 3 testleri (`PredicateFilterStage`, `ProjectionStage`, `FileSink`, `PipelineBuilder`, sıralama bağımsızlığı)
-- **33–42:** Artım 4 yükleyici ve kayıt defteri testleri:
-  - `test_33_loader_valid_configuration` (Geçerli bir yapılandırma)
-  - `test_34_loader_unknown_stage_type` (Bilinmeyen bir aşama türü)
-  - `test_35_loader_missing_parameter` (Eksik bir parametre)
-  - `test_36_loader_wrong_parameter_type` (Yanlış türde bir parametre)
-  - `test_37_loader_empty_pipeline` (Boş bir işlem hattı)
-  - `test_38_three_config_files_produce_different_outputs` (3 ayrı yapılandırma dosyasının 3 farklı çıktı üretmesi)
-  - `test_39_stage_registry_dynamic_plugin_registration` (`StageRegistry` dinamik eklenti kaydı)
-  - `test_40_loader_stage_stream_type_mismatch` (Akış türü uyumsuzluğu denetimi)
-  - `test_41_loader_unknown_source_sink_and_extra_params` (Bilinmeyen source/sink ve tanımsız parametre denetimi)
-  - `test_42_filter_factory_all_operators_and_fields` (`StageFactory` tüm operatör ve alan testleri)
-
-```bash
-# 42 testi derle ve çalıştır
-make test
-
-# GCOV Satır Kapsama Raporu Üret
-make coverage
+```text
+----------------------------------------------------------------------
+ CALISTIRMA OZETI (RunSummary) - [chaos-resilience-pipeline]
+----------------------------------------------------------------------
+ Gelen Kayit Sayisi (recordsIn)        : 11
+ Cikan Kayit Sayisi (recordsOut)       : 3
+ Dead-Letter Kanalina Giden Kayit      : 8
+ Atlanan / Elenen Kayit (SKIP/Filter)  : 0 (SKIP: 0, Filter: 0)
+ Asama Bazinda Atilan Kayit Sayisi     :
+   - [1] parse      (Politika: DEAD_LETTER) : 5 atildi [DEAD_LETTER: 5, SKIP: 0]
+   - [2] validate   (Politika: DEAD_LETTER) : 3 atildi [DEAD_LETTER: 3, SKIP: 0]
+   - [3] project    (Politika: SKIP       ) : 0 atildi [DEAD_LETTER: 0, SKIP: 0]
+ Sayisal Mutabakat (In == Out + Drop)  : DOGRULANDI (TAM TUTARLI) [In(11) == Out(3) + Skipped(0) + DeadLetter(8)]
+ Gercek Gecen Sure (Wall-Clock Time)   : 2.340 ms (2340 us)
+ Isleme Hizi (Throughput - 8/9. Hafta) : 4700.9 kayit/sn
+----------------------------------------------------------------------
 ```

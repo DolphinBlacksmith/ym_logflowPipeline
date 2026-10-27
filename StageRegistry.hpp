@@ -9,18 +9,18 @@
 /**
  * @brief Veri Odaklı Aşama Kayıt Defteri (StageRegistry).
  *
- * Artım 4 Mimari Odak:
- * - Genişletilebilirlik (Extensibility / Open-Closed Principle)
- * - Eklenti / Kayıt Defteri (Plugin / Registry) Tasarım Kalıbı
- * - Sabit kodlanmış `switch` veya `if-else` blokları İÇERMEZ; tamamen veri odaklı
- *   (data-driven) tek bir kayıt tablosu (`std::map<std::string, StageFactory>`) ve
- *   otomatik eklenti kayıt mekanizması (`REGISTER_LOGFLOW_STAGE`) kullanır.
+ * Artım 4 & 5:
+ * - Sabit kodlanmış `switch` veya `if-else` blokları içermez.
+ * - `parse`, `validate`, `filter`, `project` aşamalarını, kaynakları (`file`),
+ *   ana hedefleri (`file`, `console`) ve dead-letter hedeflerini (`file`, `console`)
+ *   veri odaklı kayıt tablolarında tutar.
  */
 class StageRegistry {
 private:
     std::map<std::string, StageFactory> stageTable_;
     std::map<std::string, StageFactory::SourceCreator> sourceTable_;
     std::map<std::string, StageFactory::SinkCreator> sinkTable_;
+    std::map<std::string, StageFactory::DeadLetterSinkCreator> deadLetterSinkTable_;
 
     static std::string joinKeys(const std::vector<std::string>& keys) {
         std::ostringstream oss;
@@ -32,34 +32,32 @@ private:
     }
 
 public:
-    /**
-     * @brief Varsayılan yerleşik bileşenleri tek bir veri odaklı kayıt tablosundan yükler.
-     */
     StageRegistry()
         : stageTable_{
-              {"parse",   StageFactory::forParserStage("parse",   &StageFactory::createParseStage)},
-              {"filter",  StageFactory::forRecordStage("filter",  &StageFactory::createFilterStage)},
-              {"project", StageFactory::forRecordStage("project", &StageFactory::createProjectStage)}
+              {"parse",    StageFactory::forParserStage("parse",    &StageFactory::createParseStage)},
+              {"validate", StageFactory::forRecordStage("validate", &StageFactory::createValidateStage)},
+              {"filter",   StageFactory::forRecordStage("filter",   &StageFactory::createFilterStage)},
+              {"project",  StageFactory::forRecordStage("project",  &StageFactory::createProjectStage)}
           },
           sourceTable_{
-              {"file",    &StageFactory::createFileSource}
+              {"file",     &StageFactory::createFileSource}
           },
           sinkTable_{
-              {"file",    &StageFactory::createFileSink},
-              {"console", &StageFactory::createConsoleSink}
+              {"file",     &StageFactory::createFileSink},
+              {"console",  &StageFactory::createConsoleSink}
+          },
+          deadLetterSinkTable_{
+              {"file",     &StageFactory::createDeadLetterFileSink},
+              {"console",  &StageFactory::createDeadLetterConsoleSink}
           } {}
 
-    /**
-     * @brief Küresel (Singleton) Kayıt Defteri Erişimcisi.
-     * Statik eklenti makroları (`REGISTER_LOGFLOW_STAGE`) bu örnek üzerinden otomatik kayıt yapar.
-     */
     static StageRegistry& instance() {
         static StageRegistry globalRegistry;
         return globalRegistry;
     }
 
     // ========================================================================
-    // EKLENTİ KAYIT METOTLARI (YENİ AŞAMALAR İÇİN AÇIK-KAPALI İLKESİ - OCP)
+    // EKLENTİ KAYIT METOTLARI (OCP)
     // ========================================================================
 
     void registerStage(const std::string& typeName, const StageFactory& factory) {
@@ -91,6 +89,13 @@ public:
         sinkTable_[typeName] = std::move(creator);
     }
 
+    void registerDeadLetterSink(const std::string& typeName, StageFactory::DeadLetterSinkCreator creator) {
+        if (typeName.empty()) {
+            throw ConfigValidationException("Kayit edilecek dead-letter hedef turu adi bos olamaz.");
+        }
+        deadLetterSinkTable_[typeName] = std::move(creator);
+    }
+
     // ========================================================================
     // SORGULAMA VE FABRİKA ÇÖZÜMLEME METOTLARI (SWITCH-FREE LOOKUP)
     // ========================================================================
@@ -105,6 +110,10 @@ public:
 
     bool hasSink(const std::string& typeName) const {
         return sinkTable_.find(typeName) != sinkTable_.end();
+    }
+
+    bool hasDeadLetterSink(const std::string& typeName) const {
+        return deadLetterSinkTable_.find(typeName) != deadLetterSinkTable_.end();
     }
 
     std::vector<std::string> registeredStageTypes() const {
@@ -128,10 +137,13 @@ public:
         return keys;
     }
 
-    /**
-     * @brief Aşama türü adına karşılık gelen StageFactory nesnesini bulur.
-     * Tür kayıtlı değilse, kayıtlı tüm geçerli türleri içeren açık bir hata fırlatır.
-     */
+    std::vector<std::string> registeredDeadLetterSinkTypes() const {
+        std::vector<std::string> keys;
+        keys.reserve(deadLetterSinkTable_.size());
+        for (const auto& kv : deadLetterSinkTable_) keys.push_back(kv.first);
+        return keys;
+    }
+
     const StageFactory& getStageFactory(const std::string& typeName) const {
         auto it = stageTable_.find(typeName);
         if (it == stageTable_.end()) {
@@ -142,9 +154,6 @@ public:
         return it->second;
     }
 
-    /**
-     * @brief Kaynak (Source) türü adına karşılık gelen fabrikayı çalıştırır.
-     */
     Source<std::string>* createSource(const std::string& typeName, const StageParams& params) const {
         auto it = sourceTable_.find(typeName);
         if (it == sourceTable_.end()) {
@@ -155,9 +164,6 @@ public:
         return it->second(params);
     }
 
-    /**
-     * @brief Hedef (Sink) türü adına karşılık gelen fabrikayı çalıştırır.
-     */
     Sink<LogRecord>* createSink(const std::string& typeName, const StageParams& params) const {
         auto it = sinkTable_.find(typeName);
         if (it == sinkTable_.end()) {
@@ -167,15 +173,18 @@ public:
         }
         return it->second(params);
     }
+
+    Sink<FailedRecord>* createDeadLetterSink(const std::string& typeName, const StageParams& params) const {
+        auto it = deadLetterSinkTable_.find(typeName);
+        if (it == deadLetterSinkTable_.end()) {
+            throw ConfigValidationException(
+                "Bilinmeyen dead-letter hedef turu (Unknown dead-letter sink type): '" + typeName +
+                "'. Kayitli gecerli dead-letter hedef turleri: [" + joinKeys(registeredDeadLetterSinkTypes()) + "].");
+        }
+        return it->second(params);
+    }
 };
 
-/**
- * @brief Bildirimsel Otomatik Aşama Kayıt Yardımcısı (Self-Registering Plugin Helper).
- *
- * C#'taki `[Stage("name")]` özniteliği ve Java'daki `ServiceLoader` mekanizmasının
- * C++ karşılığıdır. Yeni bir aşama başlık dosyasında `REGISTER_LOGFLOW_STAGE("isim", fabrika)`
- * çağrıldığında program başlarken otomatik olarak `StageRegistry::instance()` tablosuna eklenir.
- */
 struct StageAutoRegistrar {
     StageAutoRegistrar(const std::string& typeName, StageFactory::RecordStageCreator creator) {
         StageRegistry::instance().registerStage(typeName, std::move(creator));

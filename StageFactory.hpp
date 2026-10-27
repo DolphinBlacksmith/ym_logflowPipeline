@@ -4,12 +4,17 @@
 #include "Stage.hpp"
 #include "Sink.hpp"
 #include "LogRecord.hpp"
+#include "PipelineExceptions.hpp"
+#include "FailedRecord.hpp"
+#include "ErrorPolicy.hpp"
 #include "FileLineSource.hpp"
 #include "ParserStage.hpp"
+#include "ValidationStage.hpp"
 #include "PredicateFilterStage.hpp"
 #include "ProjectionStage.hpp"
 #include "FileSink.hpp"
 #include "ConsoleSink.hpp"
+#include "DeadLetterSink.hpp"
 #include "PipelineBuilder.hpp"
 #include "Pipeline.hpp"
 
@@ -21,26 +26,23 @@
 #include <sstream>
 #include <algorithm>
 #include <memory>
+#include <utility>
 
 /**
  * @brief Yapılandırma Zamanı Hatası (Configuration-Time Exception).
  *
- * Artım 4 Mimari İlkesi (Fail Fast, Fail Loudly):
- * Yapılandırma zamanı hataları (bilinmeyen aşama türü, eksik zorunlu parametre,
- * yanlış parametre türü, boş işlem hattı) herhangi bir veri satırı işlenmeden
- * ÖNCE yakalanır ve açık, uygulanabilir (actionable) bir hata mesajıyla bildirilir.
+ * Artım 5 Görev 1:
+ * Yapılandırma hataları işlem hattının devam edemeyeceği kurtarılamaz hatalar
+ * olduğundan doğrudan `PipelineException` sınıfından türetilir.
  */
-class ConfigValidationException : public std::runtime_error {
+class ConfigValidationException : public PipelineException {
 public:
     explicit ConfigValidationException(const std::string& message)
-        : std::runtime_error("[Yapilandirma Hatasi] " + message) {}
+        : PipelineException("[Yapilandirma Hatasi] " + message, "PipelineLoader") {}
 };
 
 /**
  * @brief Tür Güvenli Yapılandırma Değeri (Typed Configuration Value).
- *
- * YAML/JSON yapılandırmasındaki değerlerin tür bilgisini (string, integer,
- * boolean, list, map) koruyarak çalışma öncesi sıkı tür denetimi sağlar.
  */
 class ConfigValue {
 public:
@@ -151,11 +153,16 @@ public:
         return (it != params_.end()) ? it->second : nullVal;
     }
 
+    void set(const std::string& key, const ConfigValue& val) {
+        params_[key] = val;
+    }
+
+    void erase(const std::string& key) {
+        params_.erase(key);
+    }
+
     const std::map<std::string, ConfigValue>& raw() const { return params_; }
 
-    /**
-     * @brief Zorunlu bir metin (string) parametresini doğrular ve döndürür.
-     */
     std::string requireString(const std::string& key, const std::string& componentContext) const {
         auto it = params_.find(key);
         if (it == params_.end() || it->second.isNull()) {
@@ -178,9 +185,6 @@ public:
         return it->second.asString();
     }
 
-    /**
-     * @brief Zorunlu bir tamsayı (integer) parametresini doğrular ve döndürür.
-     */
     long long requireInt(const std::string& key, const std::string& componentContext) const {
         auto it = params_.find(key);
         if (it == params_.end() || it->second.isNull()) {
@@ -198,9 +202,47 @@ public:
         return it->second.asInt();
     }
 
-    /**
-     * @brief Zorunlu bir metin listesi (string list) parametresini doğrular ve döndürür.
-     */
+    long long optionalInt(const std::string& key, long long defaultVal, const std::string& componentContext) const {
+        if (!has(key)) return defaultVal;
+        return requireInt(key, componentContext);
+    }
+
+    bool optionalBool(const std::string& key, bool defaultVal, const std::string& componentContext) const {
+        auto it = params_.find(key);
+        if (it == params_.end() || it->second.isNull()) return defaultVal;
+        if (!it->second.isBool()) {
+            throw ConfigValidationException(
+                "Yanlis turde parametre (Wrong parameter type): '" + componentContext +
+                "' icindeki '" + key + "' parametresi 'boolean (true/false)' turunde olmalidir, "
+                "ancak '" + it->second.typeName() + "' verildi.");
+        }
+        return it->second.asBool();
+    }
+
+    std::pair<long long, long long> optionalIntRange(const std::string& key,
+                                                     long long defaultMin,
+                                                     long long defaultMax,
+                                                     const std::string& componentContext) const {
+        auto it = params_.find(key);
+        if (it == params_.end() || it->second.isNull()) {
+            return {defaultMin, defaultMax};
+        }
+        if (!it->second.isList() || it->second.asList().size() != 2 ||
+            !it->second.asList()[0].isInt() || !it->second.asList()[1].isInt()) {
+            throw ConfigValidationException(
+                "Yanlis turde parametre (Wrong parameter type): '" + componentContext +
+                "' icindeki '" + key + "' parametresi 2 tamsayidan olusan bir aralik listesi '[min, max]' olmalidir.");
+        }
+        long long lo = it->second.asList()[0].asInt();
+        long long hi = it->second.asList()[1].asInt();
+        if (lo > hi) {
+            throw ConfigValidationException(
+                "Gecersiz aralik degeri: '" + componentContext + "' icindeki '" + key +
+                "' araliginda alt sinir (" + std::to_string(lo) + ") ust sinirdan (" + std::to_string(hi) + ") buyuk olamaz.");
+        }
+        return {lo, hi};
+    }
+
     std::vector<std::string> requireStringList(const std::string& key, const std::string& componentContext) const {
         auto it = params_.find(key);
         if (it == params_.end() || it->second.isNull()) {
@@ -235,9 +277,13 @@ public:
         return result;
     }
 
-    /**
-     * @brief Tanımsız / fazladan parametre verilip verilmediğini denetler.
-     */
+    std::vector<std::string> optionalStringList(const std::string& key,
+                                                const std::vector<std::string>& defaultList,
+                                                const std::string& componentContext) const {
+        if (!has(key)) return defaultList;
+        return requireStringList(key, componentContext);
+    }
+
     void rejectUnknownParams(const std::vector<std::string>& allowedKeys, const std::string& componentContext) const {
         for (const auto& kv : params_) {
             if (std::find(allowedKeys.begin(), allowedKeys.end(), kv.first) == allowedKeys.end()) {
@@ -256,10 +302,6 @@ public:
 
 /**
  * @brief Boru Hattı Bağlama Durumu (PipelineWiringState).
- *
- * Ham metin akışı (Stage<std::string, LogRecord>) ile alan modeli akışı
- * (Stage<LogRecord, LogRecord>) arasındaki geçişi yapılandırma zamanında
- * tür güvenli olarak yönetir.
  */
 class PipelineWiringState {
 private:
@@ -281,31 +323,46 @@ public:
         return "none";
     }
 
-    void attachStringToRecordStage(Stage<std::string, LogRecord>* stage, const std::string& stageName) {
+    void attachDeadLetterSink(Sink<FailedRecord>* dlSink, bool own = true) {
+        if (hasRecordStep_) {
+            recordStep_.withDeadLetterSink(dlSink, own);
+        } else if (hasStringStep_) {
+            stringStep_.withDeadLetterSink(dlSink, own);
+        }
+    }
+
+    void attachStringToRecordStage(Stage<std::string, LogRecord>* stage,
+                                   const std::string& stageName,
+                                   const ErrorPolicy& policy = ErrorPolicy::skip()) {
         if (!hasStringStep_) {
+            delete stage;
             throw ConfigValidationException(
                 "Asama siralama/tur uyumsuzlugu: '" + stageName +
                 "' asamasi girdi olarak 'string' bekliyor, ancak mevcut akis turu '" +
-                currentStreamTypeName() + "' (Ayrıştırıcı aşama yalnızca kaynağın hemen ardından gelebilir).");
+                currentStreamTypeName() + "' (Ayristirici asama yalnizca kaynagin hemen ardindan gelebilir).");
         }
-        recordStep_ = stringStep_.via(stage);
+        recordStep_ = stringStep_.via(stage, policy, stageName, true);
         hasStringStep_ = false;
         hasRecordStep_ = true;
     }
 
-    void attachRecordToRecordStage(Stage<LogRecord, LogRecord>* stage, const std::string& stageName) {
+    void attachRecordToRecordStage(Stage<LogRecord, LogRecord>* stage,
+                                   const std::string& stageName,
+                                   const ErrorPolicy& policy = ErrorPolicy::skip()) {
         if (!hasRecordStep_) {
+            delete stage;
             throw ConfigValidationException(
                 "Asama siralama/tur uyumsuzlugu: '" + stageName +
                 "' asamasi girdi olarak 'LogRecord' bekliyor, ancak mevcut akis turu '" +
                 currentStreamTypeName() + "'. Cozum: '" + stageName +
                 "' asamasindan once 'parse' asamasini ekleyin.");
         }
-        recordStep_ = recordStep_.via(stage);
+        recordStep_ = recordStep_.via(stage, policy, stageName, true);
     }
 
     Pipeline<void, void> finalizeWithSink(Sink<LogRecord>* sink, const std::string& pipelineName) {
         if (!hasRecordStep_) {
+            delete sink;
             throw ConfigValidationException(
                 "Boru hatti sonlandirma hatasi: Hedef (sink) 'LogRecord' bekliyor, ancak boru hatti akisi hala '" +
                 currentStreamTypeName() + "' turunde. Cozum: Boru hattina en az bir 'parse' asamasi ekleyin.");
@@ -318,17 +375,15 @@ public:
 
 /**
  * @brief Aşama Fabrikası (StageFactory).
- *
- * Yapılandırma parametrelerini (`StageParams`) doğrulayarak ilgili `Source`, `Stage`
- * veya `Sink` gerçekleştirimini (implementation) üreten fabrika bileşeni.
  */
 class StageFactory {
 public:
-    using SourceCreator      = std::function<Source<std::string>*(const StageParams&)>;
-    using ParserStageCreator = std::function<Stage<std::string, LogRecord>*(const StageParams&)>;
-    using RecordStageCreator = std::function<Stage<LogRecord, LogRecord>*(const StageParams&)>;
-    using SinkCreator        = std::function<Sink<LogRecord>*(const StageParams&)>;
-    using WiringStepFn       = std::function<void(PipelineWiringState&, const StageParams&)>;
+    using SourceCreator         = std::function<Source<std::string>*(const StageParams&)>;
+    using ParserStageCreator    = std::function<Stage<std::string, LogRecord>*(const StageParams&)>;
+    using RecordStageCreator    = std::function<Stage<LogRecord, LogRecord>*(const StageParams&)>;
+    using SinkCreator           = std::function<Sink<LogRecord>*(const StageParams&)>;
+    using DeadLetterSinkCreator = std::function<Sink<FailedRecord>*(const StageParams&)>;
+    using WiringStepFn          = std::function<void(PipelineWiringState&, const StageParams&, const ErrorPolicy&)>;
 
 private:
     std::string typeName_;
@@ -341,34 +396,28 @@ private:
 public:
     StageFactory() = default;
 
-    /**
-     * @brief std::string -> LogRecord dönüştürücü aşama fabrikası kurucusu (örn: parse).
-     */
     static StageFactory forParserStage(const std::string& typeName, ParserStageCreator creator) {
         StageFactory f;
         f.typeName_ = typeName;
         f.inputType_ = "string";
         f.outputType_ = "LogRecord";
         f.parserCreator_ = creator;
-        f.wiringFn_ = [typeName, creator](PipelineWiringState& state, const StageParams& params) {
+        f.wiringFn_ = [typeName, creator](PipelineWiringState& state, const StageParams& params, const ErrorPolicy& policy) {
             Stage<std::string, LogRecord>* stage = creator(params);
-            state.attachStringToRecordStage(stage, typeName);
+            state.attachStringToRecordStage(stage, typeName, policy);
         };
         return f;
     }
 
-    /**
-     * @brief LogRecord -> LogRecord dönüştürücü/filtreleyici aşama fabrikası kurucusu (örn: filter, project).
-     */
     static StageFactory forRecordStage(const std::string& typeName, RecordStageCreator creator) {
         StageFactory f;
         f.typeName_ = typeName;
         f.inputType_ = "LogRecord";
         f.outputType_ = "LogRecord";
         f.recordCreator_ = creator;
-        f.wiringFn_ = [typeName, creator](PipelineWiringState& state, const StageParams& params) {
+        f.wiringFn_ = [typeName, creator](PipelineWiringState& state, const StageParams& params, const ErrorPolicy& policy) {
             Stage<LogRecord, LogRecord>* stage = creator(params);
-            state.attachRecordToRecordStage(stage, typeName);
+            state.attachRecordToRecordStage(stage, typeName, policy);
         };
         return f;
     }
@@ -377,19 +426,15 @@ public:
     const std::string& inputType() const { return inputType_; }
     const std::string& outputType() const { return outputType_; }
 
-    /**
-     * @brief Aşamayı oluşturur ve boru hattı durumuna bağlar.
-     */
-    void wire(PipelineWiringState& state, const StageParams& params) const {
+    void wire(PipelineWiringState& state,
+              const StageParams& params,
+              const ErrorPolicy& policy = ErrorPolicy::skip()) const {
         if (!wiringFn_) {
             throw ConfigValidationException("Fabrika fonksiyonu tanimsiz: '" + typeName_ + "'");
         }
-        wiringFn_(state, params);
+        wiringFn_(state, params, policy);
     }
 
-    /**
-     * @brief Doğrudan LogRecord aşaması örneği üretir (birim testler ve doğrudan kullanım için).
-     */
     Stage<LogRecord, LogRecord>* createRecordStage(const StageParams& params) const {
         if (!recordCreator_) {
             throw ConfigValidationException(
@@ -399,9 +444,6 @@ public:
         return recordCreator_(params);
     }
 
-    /**
-     * @brief Doğrudan Parser aşaması örneği üretir (birim testler ve doğrudan kullanım için).
-     */
     Stage<std::string, LogRecord>* createParserStage(const StageParams& params) const {
         if (!parserCreator_) {
             throw ConfigValidationException(
@@ -415,10 +457,6 @@ public:
     // YERLEŞİK (BUILT-IN) BİLEŞEN FABRİKA FONKSİYONLARI
     // ========================================================================
 
-    /**
-     * @brief 'file' kaynağı (FileLineSource) fabrikası.
-     * Beklenen parametreler: { path: <string> }
-     */
     static Source<std::string>* createFileSource(const StageParams& params) {
         const std::string ctx = "source (type: file)";
         params.rejectUnknownParams({"path"}, ctx);
@@ -426,34 +464,95 @@ public:
         return new FileLineSource(path);
     }
 
-    /**
-     * @brief 'parse' aşaması (ParserStage) fabrikası.
-     * Beklenen parametreler: { format: "clf" | "combined" }
-     */
     static Stage<std::string, LogRecord>* createParseStage(const StageParams& params) {
         const std::string ctx = "stage (type: parse)";
-        params.rejectUnknownParams({"format"}, ctx);
+        params.rejectUnknownParams({"format", "maxLineBytes", "deferRangeChecks"}, ctx);
         std::string format = params.requireString("format", ctx);
         if (format != "clf" && format != "combined") {
             throw ConfigValidationException(
                 "Gecersiz parametre degeri: '" + ctx + "' icinde desteklenmeyen format '" + format +
                 "'. Desteklenen formatlar: [clf, combined].");
         }
-        return new ParserStage();
+        long long maxBytes = params.optionalInt("maxLineBytes", static_cast<long long>(ParserStage::DEFAULT_MAX_LINE_BYTES), ctx);
+        if (maxBytes <= 0) {
+            throw ConfigValidationException(
+                "Gecersiz parametre degeri: '" + ctx + "' icinde 'maxLineBytes' pozitif bir tamsayi olmalidir.");
+        }
+        bool deferRanges = params.optionalBool("deferRangeChecks", false, ctx);
+        return new ParserStage(true, deferRanges, static_cast<size_t>(maxBytes));
     }
 
     /**
-     * @brief 'filter' aşaması (PredicateFilterStage) fabrikası.
-     * Beklenen parametreler: { field: <string>, op: <string>, value: <int|string> }
+     * @brief 'validate' aşaması (ValidationStage) fabrikası (Artım 5 Görev 3).
      *
-     * Sayısal alanlar (status, bytes):
-     *   - Geçerli operatörler: ==, !=, >, >=, <, <=
-     *   - value türü zorunluluğu: integer (tamsayı)
-     *
-     * Metin alanları (clientIp, ip, method, path, userAgent, timestamp):
-     *   - Geçerli operatörler: ==, !=, startsWith, contains, endsWith, >, >=, <, <=
-     *   - value türü zorunluluğu: string (metin)
+     * Desteklenen bildirimsel parametreler:
+     * - requiredFields / required : [clientIp, method, path, timestamp, ...]
+     * - statusRange               : [100, 599] (veya minStatus / maxStatus)
+     * - bytesRange                : [0, 104857600] (veya minBytes / maxBytes)
+     * - timestampYearRange        : [2000, 2035] (veya yearRange / minYear / maxYear)
+     * - validateIp                : true | false (veya validateIpFormat)
+     * - allowedMethods            : [GET, POST, PUT, DELETE, ...]
      */
+    static Stage<LogRecord, LogRecord>* createValidateStage(const StageParams& params) {
+        const std::string ctx = "stage (type: validate)";
+        params.rejectUnknownParams({
+            "requiredFields", "required",
+            "statusRange", "minStatus", "maxStatus",
+            "bytesRange", "minBytes", "maxBytes",
+            "timestampYearRange", "yearRange", "minYear", "maxYear",
+            "validateIp", "validateIpFormat",
+            "allowedMethods"
+        }, ctx);
+
+        ValidationRules rules;
+
+        if (params.has("requiredFields")) {
+            rules.requiredFields = params.requireStringList("requiredFields", ctx);
+        } else if (params.has("required")) {
+            rules.requiredFields = params.requireStringList("required", ctx);
+        }
+
+        if (params.has("statusRange")) {
+            auto r = params.optionalIntRange("statusRange", rules.minStatus, rules.maxStatus, ctx);
+            rules.minStatus = static_cast<int>(r.first);
+            rules.maxStatus = static_cast<int>(r.second);
+        }
+        rules.minStatus = static_cast<int>(params.optionalInt("minStatus", rules.minStatus, ctx));
+        rules.maxStatus = static_cast<int>(params.optionalInt("maxStatus", rules.maxStatus, ctx));
+
+        if (params.has("bytesRange")) {
+            auto r = params.optionalIntRange("bytesRange", rules.minBytes, rules.maxBytes, ctx);
+            rules.minBytes = r.first;
+            rules.maxBytes = r.second;
+        }
+        rules.minBytes = params.optionalInt("minBytes", rules.minBytes, ctx);
+        rules.maxBytes = params.optionalInt("maxBytes", rules.maxBytes, ctx);
+
+        if (params.has("timestampYearRange")) {
+            auto r = params.optionalIntRange("timestampYearRange", rules.minYear, rules.maxYear, ctx);
+            rules.minYear = static_cast<int>(r.first);
+            rules.maxYear = static_cast<int>(r.second);
+        } else if (params.has("yearRange")) {
+            auto r = params.optionalIntRange("yearRange", rules.minYear, rules.maxYear, ctx);
+            rules.minYear = static_cast<int>(r.first);
+            rules.maxYear = static_cast<int>(r.second);
+        }
+        rules.minYear = static_cast<int>(params.optionalInt("minYear", rules.minYear, ctx));
+        rules.maxYear = static_cast<int>(params.optionalInt("maxYear", rules.maxYear, ctx));
+
+        if (params.has("validateIpFormat")) {
+            rules.validateIp = params.optionalBool("validateIpFormat", rules.validateIp, ctx);
+        } else {
+            rules.validateIp = params.optionalBool("validateIp", rules.validateIp, ctx);
+        }
+
+        if (params.has("allowedMethods")) {
+            rules.allowedMethods = params.requireStringList("allowedMethods", ctx);
+        }
+
+        return new ValidationStage(rules);
+    }
+
     static Stage<LogRecord, LogRecord>* createFilterStage(const StageParams& params) {
         const std::string ctx = "stage (type: filter)";
         params.rejectUnknownParams({"field", "op", "value"}, ctx);
@@ -467,13 +566,11 @@ public:
                 "Cozum: params bloguna 'value: <deger>' ekleyin.");
         }
 
-        // Veri odaklı sayısal alan çıkarıcı tablosu
         static const std::map<std::string, std::function<long long(const LogRecord&)>> numericExtractors = {
             {"status", [](const LogRecord& r) -> long long { return r.status(); }},
             {"bytes",  [](const LogRecord& r) -> long long { return r.bytes(); }}
         };
 
-        // Veri odaklı metin alanı çıkarıcı tablosu
         static const std::map<std::string, std::function<std::string(const LogRecord&)>> stringExtractors = {
             {"clientIp",  [](const LogRecord& r) { return r.clientIp(); }},
             {"ip",        [](const LogRecord& r) { return r.clientIp(); }},
@@ -483,7 +580,6 @@ public:
             {"timestamp", [](const LogRecord& r) { return r.getTimestampIso(); }}
         };
 
-        // Veri odaklı sayısal karşılaştırma operatör tablosu
         static const std::map<std::string, std::function<bool(long long, long long)>> numericOps = {
             {"==", [](long long a, long long b) { return a == b; }},
             {"!=", [](long long a, long long b) { return a != b; }},
@@ -493,7 +589,6 @@ public:
             {"<=", [](long long a, long long b) { return a <= b; }}
         };
 
-        // Veri odaklı metin karşılaştırma operatör tablosu
         static const std::map<std::string, std::function<bool(const std::string&, const std::string&)>> stringOps = {
             {"==",         [](const std::string& a, const std::string& b) { return a == b; }},
             {"!=",         [](const std::string& a, const std::string& b) { return a != b; }},
@@ -545,10 +640,6 @@ public:
             "Desteklenen alanlar: [status, bytes, clientIp, method, path, userAgent, timestamp].");
     }
 
-    /**
-     * @brief 'project' aşaması (ProjectionStage) fabrikası.
-     * Beklenen parametreler: { fields: [field1, field2, ...] }
-     */
     static Stage<LogRecord, LogRecord>* createProjectStage(const StageParams& params) {
         const std::string ctx = "stage (type: project)";
         params.rejectUnknownParams({"fields"}, ctx);
@@ -570,10 +661,6 @@ public:
         return new ProjectionStage(fields);
     }
 
-    /**
-     * @brief 'file' hedefi (FileSink) fabrikası.
-     * Beklenen parametreler: { path: <string> }
-     */
     static Sink<LogRecord>* createFileSink(const StageParams& params) {
         const std::string ctx = "sink (type: file)";
         params.rejectUnknownParams({"path"}, ctx);
@@ -581,13 +668,22 @@ public:
         return new FileSink(path);
     }
 
-    /**
-     * @brief 'console' hedefi (ConsoleSink) fabrikası.
-     * Beklenen parametreler: {} (parametresiz)
-     */
     static Sink<LogRecord>* createConsoleSink(const StageParams& params) {
         const std::string ctx = "sink (type: console)";
         params.rejectUnknownParams({}, ctx);
         return new ConsoleSink();
+    }
+
+    static Sink<FailedRecord>* createDeadLetterFileSink(const StageParams& params) {
+        const std::string ctx = "deadLetter (type: file)";
+        params.rejectUnknownParams({"path"}, ctx);
+        std::string path = params.requireString("path", ctx);
+        return new DeadLetterFileSink(path);
+    }
+
+    static Sink<FailedRecord>* createDeadLetterConsoleSink(const StageParams& params) {
+        const std::string ctx = "deadLetter (type: console)";
+        params.rejectUnknownParams({}, ctx);
+        return new DeadLetterConsoleSink();
     }
 };

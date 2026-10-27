@@ -3,6 +3,12 @@
 #include <vector>
 #include <sstream>
 #include <fstream>
+#include "PipelineExceptions.hpp"
+#include "FailedRecord.hpp"
+#include "ErrorPolicy.hpp"
+#include "DeadLetterSink.hpp"
+#include "ValidationStage.hpp"
+#include "RunSummary.hpp"
 #include "FileLineSource.hpp"
 #include "ParserStage.hpp"
 #include "PredicateFilterStage.hpp"
@@ -33,8 +39,13 @@ static void printFileContent(const std::string& path) {
     }
     if (!f.is_open()) return;
     std::string line;
+    int lineNo = 0;
     while (std::getline(f, line)) {
+        lineNo++;
         std::cout << "  " << line << "\n";
+    }
+    if (lineNo == 0) {
+        std::cout << "  (Dosya bos - 0 satir)\n";
     }
 }
 
@@ -42,7 +53,7 @@ static void printUsage(const char* progName) {
     std::cout << "Kullanim:\n"
               << "  " << progName << " --config <yapilandirma.yaml>\n"
               << "  " << progName << " [girdi_dosyasi] [secenekler]\n\n"
-              << "Artim 4 - Yapilandirma Odakli Secenekler:\n"
+              << "Artim 5 & 4 - Yapilandirma Odakli Secenekler:\n"
               << "  --config, -c <dosya.yaml>    Bildirimsel YAML yapilandirma dosyasindan boru hattini yukler ve calistirir\n\n"
               << "Artim 3 - Dogrudan CLI Secenekleri:\n"
               << "  --filter <1|2|3|4|5>         Hazir filtre seceneklerinden birini dogrudan calistirir\n"
@@ -53,13 +64,14 @@ static void printUsage(const char* progName) {
               << "  --order <sira>               Asama siralamasi: 'filter-first' (varsayilan) veya 'project-first'\n"
               << "  --help, -h                   Bu yardim iletisini gosterir\n\n"
               << "Ornekler:\n"
+              << "  " << progName << " --config configs/chaos-test.yaml\n"
+              << "  " << progName << " --config configs/empty-file-test.yaml\n"
               << "  " << progName << " --config configs/error-report.yaml\n"
               << "  " << progName << " --config configs/api-traffic.yaml\n"
-              << "  " << progName << " --config configs/bandwidth-by-client.yaml\n"
-              << "  " << progName << " data/access-small.log --min-status 400 --path-prefix /api --fields timestamp,clientIp,status\n";
+              << "  " << progName << " --config configs/bandwidth-by-client.yaml\n";
 }
 
-// Artım 4: YAML yapılandırma dosyasından boru hattını yükleyip çalıştıran fonksiyon
+// Artım 4 & 5: YAML yapılandırma dosyasından boru hattını yükleyip çalıştıran fonksiyon
 static int runFromConfigFile(const std::string& configPath, bool showFilePreview = false) {
     try {
         PipelineLoader loader(StageRegistry::instance());
@@ -67,7 +79,7 @@ static int runFromConfigFile(const std::string& configPath, bool showFilePreview
         Pipeline<> pipeline = loader.loadFromConfig(cfg);
 
         std::cout << "======================================================================\n";
-        std::cout << " LogFlow Boru Hatti (Artim 4 - Yapilandirma Odakli Birlestirme)\n";
+        std::cout << " LogFlow Boru Hatti (Artim 5 - Hata Yonetimi, Dogrulama & Dead-Letter)\n";
         std::cout << "======================================================================\n";
         std::cout << " Yapilandirma Dosyasi : " << configPath << "\n";
         std::cout << " Boru Hatti Adi       : " << pipeline.getName() << "\n";
@@ -76,29 +88,47 @@ static int runFromConfigFile(const std::string& configPath, bool showFilePreview
             std::cout << " (" << cfg.source.params.get("path").asString() << ")";
         }
         std::cout << "\n";
-        std::cout << " Asama Sayisi         : " << cfg.stages.size() << " asama [";
+        std::cout << " Asamalar & Politikalar: " << cfg.stages.size() << " asama [";
         for (size_t i = 0; i < cfg.stages.size(); ++i) {
             if (i > 0) std::cout << " -> ";
-            std::cout << cfg.stages[i].type;
+            std::cout << cfg.stages[i].type << "(" << cfg.stages[i].policy.toString() << ")";
         }
         std::cout << "]\n";
-        std::cout << " Hedef (Sink)         : " << cfg.sink.type;
+        std::cout << " Ana Hedef (Sink)     : " << cfg.sink.type;
         std::string outPath = "";
         if (cfg.sink.params.has("path")) {
             outPath = cfg.sink.params.get("path").asString();
             std::cout << " (" << outPath << ")";
         }
         std::cout << "\n";
+
+        std::string dlPath = "";
+        if (cfg.hasDeadLetter) {
+            std::cout << " Dead-Letter Hedefi   : " << cfg.deadLetter.type;
+            if (cfg.deadLetter.params.has("path")) {
+                dlPath = cfg.deadLetter.params.get("path").asString();
+                std::cout << " (" << dlPath << ")";
+            }
+            std::cout << "\n";
+        }
         std::cout << "----------------------------------------------------------------------\n";
 
         pipeline.run();
 
         if (!outPath.empty()) {
-            std::cout << "-> Islem tamamlandi. Cikti '" << outPath << "' dosyasina yazildi.\n";
+            std::cout << "-> Ana cikti '" << outPath << "' dosyasina yazildi.\n";
             if (showFilePreview) {
                 std::cout << "----------------------------------------------------------------------\n";
-                std::cout << " Cikti Icerigi (" << outPath << "):\n";
+                std::cout << " Ana Cikti Icerigi (" << outPath << "):\n";
                 printFileContent(outPath);
+            }
+        }
+        if (!dlPath.empty()) {
+            std::cout << "-> Dead-Letter ciktisi '" << dlPath << "' dosyasina yazildi.\n";
+            if (showFilePreview) {
+                std::cout << "----------------------------------------------------------------------\n";
+                std::cout << " Dead-Letter Kanal Icerigi (" << dlPath << "):\n";
+                printFileContent(dlPath);
             }
         }
         std::cout << "======================================================================\n";
@@ -106,10 +136,76 @@ static int runFromConfigFile(const std::string& configPath, bool showFilePreview
     } catch (const ConfigValidationException& e) {
         std::cerr << e.what() << "\n";
         return 1;
+    } catch (const PipelineException& e) {
+        std::cerr << "[PipelineException - Kurtarilamaz Hata] " << e.what() << "\n";
+        return 1;
     } catch (const std::exception& e) {
         std::cerr << "[Calisma Zamani Hatasi] " << e.what() << "\n";
         return 1;
     }
+}
+
+// Artım 5: Hata Politikaları Karşılaştırma Demosu (FAIL_FAST, SKIP, DEAD_LETTER, RETRY(n))
+static void runErrorPolicyDemo() {
+    std::cout << "\n======================================================================\n";
+    std::cout << " Artim 5: Hata Politikalari Demosu (FAIL_FAST, SKIP, DEAD_LETTER, RETRY)\n";
+    std::cout << "======================================================================\n";
+
+    // 1. FAIL_FAST Demosu
+    std::cout << "\n--- [1] FAIL_FAST Politikasi (Ilk hatali kayitta boru hattini durdurur) ---\n";
+    try {
+        PipelineLoader loader;
+        std::string yamlFailFast =
+            "pipeline:\n"
+            "  name: demo-fail-fast\n"
+            "  source:\n"
+            "    type: file\n"
+            "    params: { path: data/access-dirty.log }\n"
+            "  stages:\n"
+            "    - type: parse\n"
+            "      policy: FAIL_FAST\n"
+            "      params: { format: combined }\n"
+            "  sink:\n"
+            "    type: file\n"
+            "    params: { path: out/demo-failfast.log }\n";
+        Pipeline<> p = loader.loadFromString(yamlFailFast);
+        p.run();
+    } catch (const PipelineException& e) {
+        std::cout << "Yakalanan PipelineException:\n  " << e.what() << "\n";
+    }
+
+    // 2. SKIP Demosu
+    std::cout << "\n--- [2] SKIP Politikasi (Hatali kayitlari atlar ve sayisini tutar) ---\n";
+    {
+        PipelineLoader loader;
+        std::string yamlSkip =
+            "pipeline:\n"
+            "  name: demo-skip-policy\n"
+            "  source:\n"
+            "    type: file\n"
+            "    params: { path: data/access-dirty.log }\n"
+            "  stages:\n"
+            "    - type: parse\n"
+            "      policy: SKIP\n"
+            "      params: { format: combined }\n"
+            "    - type: validate\n"
+            "      policy: SKIP\n"
+            "      params:\n"
+            "        requiredFields: [clientIp, method, path, timestamp]\n"
+            "        statusRange: [100, 599]\n"
+            "        bytesRange: [0, 104857600]\n"
+            "        timestampYearRange: [2000, 2035]\n"
+            "        validateIp: true\n"
+            "  sink:\n"
+            "    type: file\n"
+            "    params: { path: out/demo-skip.log }\n";
+        Pipeline<> p = loader.loadFromString(yamlSkip);
+        p.run();
+    }
+
+    // 3. DEAD_LETTER Demosu
+    std::cout << "\n--- [3] DEAD_LETTER Politikasi (Hatali kayitlari ikincil kanala yonlendirir) ---\n";
+    runFromConfigFile("configs/chaos-test.yaml", false);
 }
 
 // Artım 4: Yapılandırma zamanı hata yakalama (Fail-Fast / Fail-Loudly) canlı gösterimi
@@ -185,21 +281,21 @@ static void runFailFastDemo() {
     };
 
     std::cout << "\n======================================================================\n";
-    std::cout << " Yapilandirma Zamani Hata Denetimi Demosu (Fail Fast, Fail Loudly)\n";
+    std::cout << " Yapilandirma Zamani Hata Denetimi Demosu (PipelineException)\n";
     std::cout << "======================================================================\n";
     for (const auto& c : cases) {
         std::cout << "\n--- " << c.title << " ---\n";
         try {
             Pipeline<> p = loader.loadFromString(c.yaml);
             p.run();
-        } catch (const ConfigValidationException& e) {
+        } catch (const PipelineException& e) {
             std::cout << "Yakalanan Hata:\n  " << e.what() << "\n";
         }
     }
     std::cout << "======================================================================\n";
 }
 
-// Artım 3 Geriye Dönük Uyumluluk: Belirtilen CLI konfigürasyonuna göre boru hattını çalıştıran fonksiyon
+// Artım 3 Geriye Dönük Uyumluluk
 static void executePipeline(const std::string& inputFile,
                             const std::string& outputFile,
                             int filterChoice,
@@ -221,7 +317,7 @@ static void executePipeline(const std::string& inputFile,
 
     ParserStage parser;
     auto step = PipelineBuilder::from(new FileLineSource(inputFile))
-        .via(&parser, false);
+        .via(&parser, ErrorPolicy::skip(), "parse", false);
 
     std::vector<Stage<LogRecord, LogRecord>*> filterStages;
 
@@ -285,8 +381,6 @@ static void executePipeline(const std::string& inputFile,
         p.run();
     }
 
-    std::cout << "----------------------------------------------------------------------\n";
-    std::cout << " Boru Hatti Tamamlandi | Atlanan/Hatali Satir Sayisi: " << parser.getErrorCount() << "\n";
     std::cout << "======================================================================\n\n";
 }
 
@@ -334,7 +428,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Artım 4: --config <yaml> verilmişse doğrudan PipelineLoader ile çalıştır
     if (!configFile.empty()) {
         return runFromConfigFile(configFile, false);
     }
@@ -365,20 +458,19 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // Parametresiz çalıştırma (IDE / Terminal): Artım 4 İnteraktif Yapılandırma Menüsü
+    // Parametresiz çalıştırma: Artım 5 İnteraktif Menü
     while (true) {
         std::cout << "\n======================================================================\n";
-        std::cout << "   LogFlow Boru Hatti (Artim 4) - Yapilandirma & Kayit Defteri Menusu\n";
+        std::cout << "   LogFlow Boru Hatti (Artim 5) - Hata Yonetimi & Dead-Letter Menusu\n";
         std::cout << "======================================================================\n";
-        std::cout << "Lutfen calistirmak istediginiz yapilandirmayi secin:\n\n";
-        std::cout << "  [1] Hata Raporu (configs/error-report.yaml)\n";
-        std::cout << "      -> status >= 400 filtreler, [timestamp, clientIp, status, path] -> out/errors.txt\n\n";
-        std::cout << "  [2] API Trafigi Veri Cikarimi (configs/api-traffic.yaml)\n";
-        std::cout << "      -> path startsWith '/api' filtreler, [timestamp, method, path, status, bytes] -> out/api-traffic.txt\n\n";
-        std::cout << "  [3] Istemci Bazinda Bant Genisligi (configs/bandwidth-by-client.yaml)\n";
-        std::cout << "      -> bytes >= 1024 filtreler, [clientIp, bytes, path, status] -> out/bandwidth-by-client.txt\n\n";
-        std::cout << "  [4] Uc Yapilandirmayi Pes Pese Calistir ve Ciktilarini Karsilastir\n";
-        std::cout << "  [5] Yapilandirma Zamani Hata Denetimi Demosu (Fail-Fast / Fail-Loudly)\n";
+        std::cout << "Lutfen calistirmak istediginiz senaryoyu secin:\n\n";
+        std::cout << "  [1] Kaos Testi: Bozuk Log Dosyasi Isleme (configs/chaos-test.yaml)\n";
+        std::cout << "      -> data/access-dirty.log -> Ana Hedef (out/clean-access.log) + Dead-Letter (out/dead-letter.log)\n\n";
+        std::cout << "  [2] Bos Dosya Kaos Testi (configs/empty-file-test.yaml)\n";
+        std::cout << "      -> data/access-empty.log -> Sifir kayitla cokmeden temiz tamamlanma\n\n";
+        std::cout << "  [3] Hata Politikalari Karsilastirma Demosu (FAIL_FAST vs SKIP vs DEAD_LETTER)\n\n";
+        std::cout << "  [4] Artim 4 Yapilandirmalarini Calistir (error-report, api-traffic, bandwidth)\n\n";
+        std::cout << "  [5] Yapilandirma Zamani Hata Denetimi Demosu (PipelineException)\n\n";
         std::cout << "  [6] Ozel YAML Yapilandirma Dosyasi Yolu Girerek Calistir\n";
         std::cout << "  [0] Cikis\n";
         std::cout << "----------------------------------------------------------------------\n";
@@ -408,11 +500,11 @@ int main(int argc, char* argv[]) {
             std::cout << "\nLogFlow'dan cikis yapildi. Iyi calismalar!\n";
             break;
         } else if (choice == 1) {
-            runFromConfigFile("configs/error-report.yaml", true);
+            runFromConfigFile("configs/chaos-test.yaml", true);
         } else if (choice == 2) {
-            runFromConfigFile("configs/api-traffic.yaml", true);
+            runFromConfigFile("configs/empty-file-test.yaml", true);
         } else if (choice == 3) {
-            runFromConfigFile("configs/bandwidth-by-client.yaml", true);
+            runErrorPolicyDemo();
         } else if (choice == 4) {
             runFromConfigFile("configs/error-report.yaml", true);
             runFromConfigFile("configs/api-traffic.yaml", true);
@@ -420,7 +512,7 @@ int main(int argc, char* argv[]) {
         } else if (choice == 5) {
             runFailFastDemo();
         } else if (choice == 6) {
-            std::cout << "YAML dosya yolunu girin (or. configs/error-report.yaml): " << std::flush;
+            std::cout << "YAML dosya yolunu girin (or. configs/chaos-test.yaml): " << std::flush;
             std::string customPath;
             if (std::getline(std::cin, customPath)) {
                 size_t f = customPath.find_first_not_of(" \t\r\n");

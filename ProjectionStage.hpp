@@ -24,5 +24,7 @@ public:
         out.emit(LogRecord::Builder::project(input, fields));
     }
 
+    std::string stageTypeName() const override { return "project"; }
+
     const std::vector<std::string>& getFields() const { return fields; }
 };

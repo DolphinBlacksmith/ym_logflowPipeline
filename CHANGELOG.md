@@ -5,26 +5,34 @@
 
 ---
 
+## [v5] Sürüm 5.0 (Artım 5 — Hata Yönetimi, Doğrulama ve Dead-Letter Kanalı)
+**Tarih:** Ekim 2026  
+**Etiket:** `v5`  
+**Mimari Odak:** Hata yönetimini mimari ve topolojik bir konu olarak ele alma, ikincil kanallar (Dead-Letter Channel), bildirimsel doğrulama (`ValidationStage`), çalıştırma özeti (`RunSummary`) ve kaos testi (`data/access-dirty.log`).
+
+### 1. Yeni Eklenen Dosyalar
+- [`PipelineExceptions.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PipelineExceptions.hpp): Kurtarılabilir kayıt hatası (`StageException`) ve kurtarılamaz işlem hattı hatası (`PipelineException`).
+- [`FailedRecord.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/FailedRecord.hpp): Başarısız kaydın tanılama bağlamını (`rawInput`, `stageName`, `exception`, `timestamp`) taşıyan `FailedRecord` sınıfı.
+- [`ErrorPolicy.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ErrorPolicy.hpp): Aşama başına ayarlanabilir hata politikaları (`FAIL_FAST`, `SKIP`, `DEAD_LETTER`, `RETRY(n)`).
+- [`DeadLetterSink.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/DeadLetterSink.hpp): İkincil çıktı kanalı hedefleri (`DeadLetterFileSink`, `DeadLetterConsoleSink`, `DeadLetterMemorySink`).
+- [`ValidationStage.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ValidationStage.hpp): Zorunlu alanlar, sayısal aralıklar, zaman damgası tutarlılığı (1970/2099) ve IPv4 biçimini denetleyen bildirimsel doğrulama aşaması.
+- [`RunSummary.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/RunSummary.hpp): Gelen/çıkan kayıt, aşama bazında atılan kayıt, dead-letter sayısı ve gerçek geçen süre (8–9. hafta ölçüm temeli) özeti.
+- [`data/access-dirty.log`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/data/access-dirty.log) & [`data/empty.log`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/data/empty.log): Kesilmiş satırlar, UTF-8 olmayan baytlar, negatif bayt sayıları, 1970/2099 zaman damgaları, 100 KB tek satır ve boş dosya içeren kaos testi verileri.
+- [`configs/chaos-test.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/chaos-test.yaml) & [`configs/empty-file-test.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/empty-file-test.yaml): Dead-Letter kanalı ve doğrulama kurallarını kullanan kaos testi yapılandırmaları.
+
+### 2. Değiştirilen Dosyalar
+- [`ParserStage.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ParserStage.hpp): UTF-8 bayt geçerliliği (`NON_UTF8_BYTES`), 100 KB aşırı uzun satır koruması (`OVERSIZED_LINE`), kesilmiş satır (`TRUNCATED_LINE`) ve `StageException` fırlatma desteği eklendi.
+- [`PipelineBuilder.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PipelineBuilder.hpp) & [`Pipeline.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Pipeline.hpp): Topolojik hata yönlendirici (`TopologicalStageRouter`), ikincil `withDeadLetterSink` bağlantısı ve `RunSummary` entegrasyonu eklendi.
+- [`StageFactory.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/StageFactory.hpp), [`StageRegistry.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/StageRegistry.hpp) & [`PipelineLoader.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PipelineLoader.hpp): `validate` aşaması, aşama başına `policy`/`onError` ayrıştırması ve `deadLetter` hedef yükleme desteği eklendi.
+- [`ARCHITECTURE.md`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ARCHITECTURE.md): `StageException` vs `PipelineException`, ikincil Dead-Letter boru hattı mimari diyagramı ve kaos testi hata-politika eşleştirme tablosu eklendi.
+- [`tests/test_runner.cpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/tests/test_runner.cpp): Test sayısı 42'den 52'ye çıkarıldı.
+
+---
+
 ## [v4] Sürüm 4.0 (Artım 4 — Yapılandırma Odaklı Birleştirme ve Aşama Kaydı)
 **Tarih:** Ekim 2026  
 **Etiket:** `v4`  
-**Mimari Odak:** Genişletilebilirlik, eklenti/kayıt defteri (plugin/registry) tasarım kalıbı, mimari tanımının mimari gerçekleştiriminden ayrılması ve yapılandırma zamanı tür doğrulaması (fail fast, fail loudly).
-
-### 1. Yeni Eklenen Dosyalar
-- [`StageFactory.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/StageFactory.hpp): Tür güvenli `ConfigValue`, parametre doğrulayıcı `StageParams`, `ConfigValidationException`, `PipelineWiringState` ve bileşen fabrika metotları (`createFileSource`, `createParseStage`, `createFilterStage`, `createProjectStage`, `createFileSink`, `createConsoleSink`).
-- [`StageRegistry.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/StageRegistry.hpp): Sabit kodlanmış `switch` içermeyen, veri odaklı (`std::map<std::string, StageFactory>`) aşama/kaynak/hedef kayıt defteri ve `REGISTER_LOGFLOW_STAGE` otomatik eklenti kayıt makrosu.
-- [`PipelineLoader.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/PipelineLoader.hpp): Sıfır bağımlılıklı YAML ayrıştırıcısı (`YamlConfigParser`) ve yapılandırmayı doğrulayıp `Pipeline` nesnesi inşa eden yükleyici sınıf.
-- [`configs/error-report.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/error-report.yaml): `status >= 400` hata raporu üreten bildirimsel yapılandırma (`out/errors.txt`).
-- [`configs/api-traffic.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/api-traffic.yaml): `path startsWith "/api"` API trafiği veri çıkarımı yapan yapılandırma (`out/api-traffic.txt`).
-- [`configs/bandwidth-by-client.yaml`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/configs/bandwidth-by-client.yaml): `bytes >= 1024` istemci bazlı bant genişliği veri çıkarımı yapan yapılandırma (`out/bandwidth-by-client.txt`).
-- [`data/access.log`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/data/access.log): Yapılandırma dosyalarının kullandığı örnek CLF erişim günlüğü.
-
-### 2. Değiştirilen Dosyalar
-- [`Pipeline.hpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/Pipeline.hpp): Yapılandırma dosyasındaki boru hattı adını (`name`) saklamak için `setName()` ve `getName()` erişimcileri eklendi.
-- [`main.cpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/main.cpp): `--config <dosya.yaml>` (ve `-c`) komut satırı desteği ve Artım 4 interaktif yapılandırma/hata denetimi menüsü eklendi.
-- [`tests/test_runner.cpp`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/tests/test_runner.cpp): Test sayısı 32'den 42'ye çıkarıldı; geçerli yapılandırma, bilinmeyen aşama türü, eksik parametre, yanlış türde parametre, boş işlem hattı, 3 ayrı yapılandırma çıktısı ve dinamik eklenti kaydı testleri eklendi.
-- [`ARCHITECTURE.md`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/ARCHITECTURE.md): Bildirimsel YAML yapılandırma şeması, `StageRegistry`/`StageFactory`/`PipelineLoader` mimarisi ve yapılandırma zamanı vs. çalışma zamanı veri hataları ayrımı belgelendi.
-- [`README.md`](file:///home/yunus/Desktop/yazılım_mimarisi/ym_logflowPipeline/README.md): Artım 4 `--config` kullanımı, üç yapılandırmanın çıktıları ve yapılandırma zamanı hata mesajı örnekleri eklendi.
+- `StageFactory`, `StageRegistry` ve `PipelineLoader` ile YAML tabanlı bildirimsel boru hattı birleştirme eklendi.
 
 ---
 
@@ -32,7 +40,6 @@
 **Tarih:** Ekim 2026  
 **Etiket:** `v3`  
 - `PredicateFilterStage`, `ProjectionStage`, `FileSink` ve `PipelineBuilder` eklendi.
-- 25.000 satırlık sıralama deneyi (Filter-First vs. Project-First) gerçekleştirildi ve belgelendi.
 
 ---
 
